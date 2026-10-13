@@ -1,5 +1,5 @@
 ---
-name: fund-investment-guide
+name: taxue-invest
 description: |
   invest系列主入口。识别标的类型，路由到专业分析工具。覆盖个股（A股/港股/美股/机构深度）、基金、单一资产（债券/可转债/大宗商品含黄金十维度/REITs）、宏观与市场环境、机构级内容产出、资产配置、基金池选基、风险管理、企业深度；三层架构：方法论（invest-*）/ 数据（mx-data，invest-cli 的统一封装）/ 呈现（mx-templates 报告模板）。取数统一走 invest-cli（多源数据层：腾讯行情/腾讯微证券/同花顺/东财/yfinance/SEC EDGAR/FRED/Wind/盈米/妙想/天天基金官方 ttskill + argo 财经垂直源）。
 

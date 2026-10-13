@@ -214,4 +214,4 @@ python3 <argo>/scripts/search.py --list-engines --detail # 含 key / 熔断 / �
 
 ---
 
-*docs/data-sources.md · fund-investment-guide v3.0*
+*docs/data-sources.md · taxue-invest v3.0*
