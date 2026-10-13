@@ -41,3 +41,19 @@ def clean_probe_cache():
     registry._PROBE_CACHE.clear()
     yield
     registry._PROBE_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def clean_wind_breaker():
+    """Wind 的进程内熔断（_UNUSABLE）同样是跨用例的全局态。
+
+    为什么必须在这里清：熔断的设计目标是「一条命令内不重复打同一个硬失败」，
+    而 pytest 一个进程跑几百条用例——上一条用例模拟出的「WIND_API_KEY 未配置」
+    会让后面所有用例的 wind.call 直接短路，症状是**别的文件**的用例失败
+    （实测 test_wind_source 三条用例被 test_missing_key_is_config_error 带崩）。
+    """
+    from sources import wind
+
+    wind._UNUSABLE = ""
+    yield
+    wind._UNUSABLE = ""

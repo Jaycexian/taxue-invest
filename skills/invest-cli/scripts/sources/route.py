@@ -13,13 +13,14 @@
 from __future__ import annotations
 
 import importlib
+import os
 import re
 from typing import Any, Callable, Optional
 
 from . import load_registry
 from .registry import detect
 
-KIND_FNS = ("stock", "fund", "us", "screen")
+KIND_FNS = ("stock", "fund", "us", "screen", "bond", "index", "macro", "news", "notice")
 # 市场对默认快照链的排除（能力边界，不是优先级）
 MARKET_EXCLUDE = {
     ("stock", "hk"): frozenset({"hithink"}),
@@ -54,20 +55,53 @@ _DOMAIN_HINT = {
 #   us    usAAPL     → yfinance 认不出 → 落到腾讯
 # 在 route（唯一的取数入口）把写法归一成裸代码，各适配器再各自加自己需要的前缀 ——
 # 一处改动覆盖四个命令，而不是让每个源各自做一遍容错。
-_PREFIXED = re.compile(r"^(sh|sz|bj|hk|us)(?=[0-9A-Za-z])", re.I)
+#
+# **歧义仲裁**（同一个前缀在两个市场都合法，必须显式判）：
+# 旧实现 `^(sh|sz|bj|hk|us)(?=[0-9A-Za-z])` 是 re.I + 任意字母，于是把**真实
+# 美股代码的前两个字母吃掉了**——实测 SHEL→EL（壳牌）、USO→O（Realty Income）、
+# SHW→W（Wayfair）、USB→B（巴里克矿业）、USMV→MV、USMOO→MOO。整条链不报错、
+# rc=0，把用户问的标的答成**另一家公司**。
+#
+# 判据（可判定，不猜）：
+#   · A 股/港股/北交所代码**全是数字** → `sh|sz|bj|hk` 后跟数字时只可能是
+#     市场前缀；后跟字母时按**不动**处理（保留原样永远对，猜错一定错）。
+#   · `us` 无法靠字面判定：美股 ticker 以字母开头，`usAAPL`（前缀写法）与
+#     `USMOO`（真实 ETF）字面完全同形。判据是**剩余长度**：去掉 `us` 后还剩
+#     ≥4 位字母才算前缀写法（`usAAPL`/`UsAAPL`/`USAAPL`），剩 ≤2 位则整串
+#     就是真实代码（`USO`/`USB`/`USMOO`）。用长度而不是大小写，是因为大小写
+#     判据会把合法的 `USAAPL` 误判成 ticker（实测回归）。
+#     本判据与 sources/tencent.normalize_code 的同名规则**逐条对齐**——
+#     两处曾各写一份并各自漂移过一次。一致性由
+#     test_round6_regressions.test_canonical_and_tencent_normalize_agree 钉住，
+#     改任一处必须同步另一处（输出方向不同：本函数产裸代码，tencent 产带前缀形式）。
+_PREFIXED = re.compile(r"^(sh|sz|bj|hk)(?=\d)", re.I)
+_PREFIXED_US = re.compile(r"^us(?=[0-9A-Za-z]{4})", re.I)
 # 只认**交易所后缀**，不动美股 ticker 里的点（BRK.B 的 .B 不是交易所代码）
 _SUFFIXED = re.compile(r"\.(SH|SZ|BJ|HK|US)$", re.I)
 
 
 def canonical_arg(arg: str) -> str:
-    """`sh600519` / `600519.SH` / `hk00700` / `usAAPL` → `600519` / `00700` / `AAPL`。"""
+    """`sh600519` / `600519.SH` / `hk00700` / `usAAPL` → `600519` / `00700` / `AAPL`。
+
+    真实美股代码原样返回：`SHEL`/`USO`/`SHW`/`USB` 不带数字尾巴，
+    不能被当成 `sh`/`us` 前缀（见上方注释里被吃掉的反例）。`us` 前缀写法
+    归一为**大写**裸代码（`USAAPL`→`AAPL`），与 tencent.normalize_code 对齐。
+    """
     t = str(arg or "").strip()
     if not t:
         return t
     m = _SUFFIXED.search(t)
     if m:
         return t[: -len(m.group(0))]
-    return _PREFIXED.sub("", t)
+    stripped = _PREFIXED.sub("", t)
+    if stripped != t:
+        return stripped
+    m_us = _PREFIXED_US.match(t)
+    if m_us:
+        # 统一大写：下游（tencent/yfinance/bitget）都按大写 ticker 匹配，
+        # `USAAPL` 不归一就会一路带着大写 US 去查，查不到（实测）。
+        return t[2:].upper()
+    return t
 
 
 def code_domain_error(kind: str, arg: str) -> str:
@@ -87,8 +121,28 @@ def code_domain_error(kind: str, arg: str) -> str:
         f"请改用：{_DOMAIN_HINT.get(code_kind, '').format(v=arg)}"
     )
 
-# 快照缓存 TTL：与 _common 的口径常量对齐；screen 是条件查询，不缓存。
-_SNAPSHOT_TTL_KINDS = {"stock": "quote", "us": "quote", "fund": "fundamental"}
+# 快照缓存 TTL：与 _common 的口径常量对齐。screen 的缓存 key 含条件文本，
+# 相同条件 60s 内重复查询秒回、不同条件互不干扰——「条件查询不缓存」的旧
+# 注释与代码不符（2026-10-11 实测命中缓存），此处对齐到代码实际行为。
+_SNAPSHOT_TTL_KINDS = {"stock": "quote", "us": "quote", "fund": "fundamental", "screen": "quote"}
+
+# 失败信封的落盘 TTL。成功结果有快照缓存而失败没有，是个不对称缺口：CLI 每次调用
+# 都是独立进程，打错代码（`stock zzzz`）要**每次**付完整条候选链——实测串行 5 源
+# 5.2s，重复查询一分不省。与 registry 负探测同一模式：短 TTL + env 可置 0。
+# 窗口不取太长，因为这里的失败混着「确证不存在」与「上游抖动」两种语义：90s 内
+# 重复查询给同一份错误可接受（错误信封自带逐源原因），换来的是 agent 探码/打错字
+# 这类调用从秒级降到毫秒级。
+_FETCH_FAIL_TTL = 90.0
+
+
+def _fetch_fail_ttl() -> float:
+    raw = os.environ.get("INVEST_CLI_FETCH_FAIL_TTL", "").strip()
+    if not raw:
+        return _FETCH_FAIL_TTL
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return _FETCH_FAIL_TTL
 
 
 def _snapshot_ttl(kind: str) -> Optional[float]:
@@ -176,6 +230,24 @@ def _invoke(sid: str, kind: str, arg: str) -> dict[str, Any]:
     return fn(arg)
 
 
+def _invoke_with(registry: dict[str, Any], sid: str, kind: str, arg: str) -> dict[str, Any]:
+    """与 _invoke 等价，但复用调用方已加载的 registry。
+
+    为什么单独一个函数：_invoke 每次都要 load_registry()，而一次冷取数会对
+    **每个候选源**各调一次。yaml 已按进程缓存（见 sources/__init__），但函数
+    调用与 dict 查找仍在热路径上；这里直接把已加载的 dict 传下去，
+    消掉「同一个 dict 反复取」这一层。
+    """
+    conf = registry.get(sid) or {}
+    mod = _adapter_module(sid, conf)
+    fn = getattr(mod, kind)
+    return fn(arg)
+
+
+# 原始 _invoke 的引用，用于识别「测试是否替换了它」（见 fetch 里的 use_loaded）。
+_INVOKE_ORIGINAL = _invoke
+
+
 def fetch(
     kind: str,
     arg: str,
@@ -233,6 +305,18 @@ def fetch(
             hit = None
         if isinstance(hit, dict) and hit.get("ok"):
             return {**hit, "cached": True}
+    # 失败信封走独立命名空间（snapshot_fail）：成功/失败的 TTL 节奏不同，
+    # 分开存就不用在条目里塞元数据，_common 一行不用改。仅默认路径启用。
+    fail_ttl = _fetch_fail_ttl() if default_path else 0.0
+    if fail_ttl:
+        try:
+            from _common import cache_get
+
+            fail_hit = cache_get("snapshot_fail", cache_key, fail_ttl)
+        except Exception:
+            fail_hit = None
+        if isinstance(fail_hit, dict) and not fail_hit.get("ok"):
+            return {**fail_hit, "cached": True}
     if order is None:
         order = candidates(kind, market=market)
     if not order:
@@ -245,6 +329,9 @@ def fetch(
         }
     registry = load_registry() if default_path else {}
     detected = 0
+    # 复用上面已加载的 registry，不再每个源重取一次。但当调用方显式替换了
+    # `_invoke`（测试注入假实现）时仍走它——那是被授权的接管点，不能绕开。
+    use_loaded = default_path and invoke is None and _invoke is _INVOKE_ORIGINAL
     for sid in order:
         if default_path:
             available, detail = detect(registry.get(sid) or {})
@@ -253,7 +340,8 @@ def fetch(
                 continue
             detected += 1
         try:
-            res = caller(sid, kind, arg)
+            res = (_invoke_with(registry, sid, kind, arg) if use_loaded
+                   else caller(sid, kind, arg))
         except Exception as e:
             errors.append(f"{sid}: {e}")
             continue
@@ -292,7 +380,7 @@ def fetch(
             "error": f"无可用数据源: kind={kind} market={market or '-'}；{'; '.join(errors)}",
             "tried": order,
         }
-    return {
+    res_fail = {
         "source": kind,
         "kind": kind,
         "ok": False,
@@ -301,6 +389,16 @@ def fetch(
         "tried": order,
         "last": last,
     }
+    if fail_ttl:
+        # 只落**整条链跑完**的失败。提前返回的不落：「无可用数据源」随探测恢复
+        # 节奏走 registry 的负缓存，空标的/域错误是确定性输入问题，缓存无意义。
+        try:
+            from _common import cache_set
+
+            cache_set("snapshot_fail", cache_key, res_fail)
+        except Exception:
+            pass
+    return res_fail
 
 
 def unwrap_snapshot(res: dict[str, Any]) -> dict[str, Any]:

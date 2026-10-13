@@ -11,6 +11,8 @@ Key 顺序与官方一致：`~/.wind-aifinmarket/config` > skill config.json > �
 """
 from __future__ import annotations
 
+from ._http import guarded_open
+
 import json
 import os
 import urllib.error
@@ -131,7 +133,7 @@ def _rpc(endpoint: str, api_key: str, method: str, params: dict[str, Any]) -> di
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=CALL_TIMEOUT) as resp:
+    with guarded_open(req, CALL_TIMEOUT, allowed_host="mcp.wind.com.cn") as resp:
         payload = _parse_sse(resp.read().decode("utf-8", errors="replace"))
     if not isinstance(payload, dict):
         raise RuntimeError("Wind 响应不是 JSON-RPC 对象")
@@ -142,7 +144,7 @@ def _rpc(endpoint: str, api_key: str, method: str, params: dict[str, Any]) -> di
     return payload.get("result") or {}
 
 
-def call(
+def _call_raw(
     server_type: str,
     tool_name: str,
     params: Optional[dict] = None,
@@ -193,3 +195,260 @@ def call(
         return {"source": SOURCE, "ok": False, "data": None, "error": f"Wind 网络失败: {e}"}
     ok, data, err = parse_wind_receipt(json.dumps(result, ensure_ascii=False))
     return {"source": SOURCE, "ok": ok, "data": data, "error": err or None}
+
+
+# 进程内熔断：额度/鉴权类**硬失败**不可能在一条命令内自愈，继续打只是把同一个失败
+# 重复 N 次（实测 Wind 积分耗尽时，6 只基金 × 4 次调用 = 24 次无谓往返，纯等网络）。
+# 只熔断硬失败：网络抖动是瞬时的，必须留给下一次重试——把抖动也熔断会让整条命令
+# 因为一次超时降级到快路径，那是「用错误换速度」。
+_UNUSABLE = ""
+_HARD_FAILURE_KEYS = ("积分", "余额不足", "未配置", "鉴权", "认证", "API key", "HTTP 401", "HTTP 403")
+
+
+def _is_hard_failure(err: str) -> bool:
+    return any(k in err for k in _HARD_FAILURE_KEYS)
+
+
+def call(
+    server_type: str,
+    tool_name: str,
+    params: Optional[dict] = None,
+    params_json: Optional[str] = None,
+) -> dict:
+    """call 的对外入口：带进程内熔断（硬失败短路），其余行为与 _call_raw 完全一致。"""
+    global _UNUSABLE
+    if _UNUSABLE:
+        return {"source": SOURCE, "ok": False, "data": None, "error": _UNUSABLE}
+    res = _call_raw(server_type, tool_name, params, params_json)
+    if not res.get("ok"):
+        err = str(res.get("error") or "")
+        if _is_hard_failure(err):
+            _UNUSABLE = err
+    return res
+
+
+# ═══ 任职期复盘（tenure）取数原语 ═══
+#
+# 三个 Wind 特有的坑收敛在这里，避免每个调用方各踩一遍：
+#   1. get_fund_performance 的自然语言入口**单次硬顶 100 行**（实测 2026-09-23：
+#      问「全部」也只回 100 行），长序列必须分段 + 并行，段宽见 NAV_CHUNK_DAYS；
+#   2. fund_data 与 index_data 的响应包装层数不同（前者多一层 data[0]），
+#      统一在 _first_rows，调用方不再各写一份 try/except；
+#   3. 场外基金没有场内行情（get_fund_kline 只覆盖 ETF/LOF），净值只能走 performance 族。
+#
+# 全部走 _common 的磁盘缓存：净值/指数/档案都是日更数据，6 小时 TTL 足够同轮复用，
+# 也让「改口径重算」不再重复打 Wind（实测 6 只基金全量重取 ≈ 75s，命中缓存 <0.1s）。
+
+NAV_CHUNK_DAYS = 120  # 120 自然日 ≈ 80 个交易日，对 100 行硬顶留 20% 余量
+CACHE_TTL_TENURE = 6 * 3600.0
+_TENURE_NS = "tenure"
+
+
+def _first_rows(resp: dict) -> tuple[list[str], list[list]]:
+    """统一取 (列名, 行)。两种包装：fund_data → data.data.data[0]；index_data → data.data。"""
+    try:
+        blk = resp["data"]["data"]["data"]
+        if isinstance(blk, list) and blk:
+            return [c["name"] for c in blk[0]["columns"]], blk[0]["rows"]
+    except (KeyError, TypeError, IndexError):
+        pass
+    try:
+        blk = resp["data"]["data"]
+        if isinstance(blk, dict) and "columns" in blk:
+            return [c["name"] for c in blk["columns"]], blk["rows"]
+    except (KeyError, TypeError):
+        pass
+    return [], []
+
+
+def _d(x: Any) -> str:
+    """日期归一：'2022-09-13T00:00:00.000+08:00' 与 '2022-09-13' 都收敛成 ISO 日期。"""
+    return str(x)[:10]
+
+
+def _cached(ns_key: str, producer):
+    from _common import cache_get, cache_set
+
+    hit = cache_get(_TENURE_NS, ns_key, CACHE_TTL_TENURE)
+    if hit is not None:
+        return hit
+    val = producer()
+    if isinstance(val, dict) and val.get("ok"):
+        cache_set(_TENURE_NS, ns_key, val)
+    return val
+
+
+def fund_nav_series(code: str, name: str, begin: str, end: str, workers: int = 4) -> dict:
+    """复权单位净值日序列（分段并行）。返回 {ok, series:[(日期, 净值)], calls, error}。
+
+    分段抓取而非一次问全：Wind 的自然语言入口有 100 行硬顶，不问「全部」是因为
+    问了也只会回 100 行 —— 静默截断比报错更危险，宁可按已知硬顶分段。
+    任一段重试后仍失败 → ok=False（不返回残缺序列：缺口会让累计收益率偏小且不报错）。
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from tenure_calc import split_chunks
+
+    def produce() -> dict:
+        jobs = split_chunks(begin, end, NAV_CHUNK_DAYS)
+        out: dict[str, float] = {}
+        failed: list[str] = []
+
+        def one(seg: tuple[str, str]):
+            b, e = seg
+            q = f"{code} {name} 从{b}到{e}的复权单位净值日序列"
+            for _ in range(2):  # 一段一次重试：Wind 偶发 5xx 不值得整单失败
+                res = call("fund_data", "get_fund_performance", params={"question": q})
+                if res.get("ok"):
+                    _, rows = _first_rows(res)
+                    if rows:
+                        return rows
+            return None
+
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
+            for seg, rows in zip(jobs, ex.map(one, jobs)):
+                if rows is None:
+                    failed.append(f"{seg[0]}~{seg[1]}")
+                    continue
+                for row in rows:
+                    if len(row) < 4 or row[2] is None:
+                        continue
+                    out[_d(row[3])] = float(row[2])
+        if failed:
+            return {"ok": False, "series": [], "calls": len(jobs),
+                    "error": f"{len(failed)}/{len(jobs)} 段取数失败: {', '.join(failed[:3])}"}
+        series = sorted(out.items())
+        if not series:
+            return {"ok": False, "series": [], "calls": len(jobs), "error": "Wind 未返回净值数据"}
+        return {"ok": True, "series": series, "calls": len(jobs), "error": None}
+
+    return _cached(f"nav|{code}|{begin}|{end}", produce)
+
+
+def index_series(windcode: str, begin: str, end: str) -> dict:
+    """指数收盘点位日序列（一次调用，无行数上限）。返回 {ok, series:[(日期, 收盘)], error}。
+
+    仅返回有行情的交易日：含港股仓位的基金业绩基准指数（基金代码+BI.WI）在港股假期
+    无行情（实测 011371BI.WI 缺 21 天），缺口由 tenure_calc.align_index 前值沿用处理。
+    """
+
+    def produce() -> dict:
+        res = call("index_data", "get_index_kline",
+                   params={"windcode": windcode, "begin_date": begin, "end_date": end})
+        if not res.get("ok"):
+            return {"ok": False, "series": [], "error": res.get("error") or "取数失败"}
+        _, rows = _first_rows(res)
+        series = sorted((_d(r[0]), float(r[2])) for r in rows if r[2] not in (None, ""))
+        if not series:
+            return {"ok": False, "series": [], "error": f"{windcode} 无行情数据"}
+        return {"ok": True, "series": series, "error": None}
+
+    return _cached(f"idx|{windcode}|{begin}|{end}", produce)
+
+
+_PROFILE_Q = ("{code} {name} 的基金全称、基金成立日、最新现任基金经理姓名、"
+              "最新现任基金经理任职日期、历任基金经理姓名和任职时间、业绩比较基准、"
+              "投资类型_二级分类、基金规模合计")
+_PROFILE_KEYS = {
+    "证券简称": "short_name", "基金全称": "full_name", "基金成立日": "inception",
+    "最新现任基金经理姓名": "managers",
+    "现任基金经理姓名": "managers", "最新现任基金经理任职日期": "manager_since",
+    "历任基金经理姓名和任职时间": "manager_history", "业绩比较基准": "benchmark",
+    "投资类型_二级分类": "fund_type", "基金规模合计": "aum", "分级基金规模": "aum",
+}
+
+
+def fund_profile(code: str, name: str = "") -> dict:
+    """基金档案：成立日 / 现任与历任基金经理及任职时间 / 业绩比较基准 / 类型 / 规模。"""
+
+    def produce() -> dict:
+        res = call("fund_data", "get_fund_info", params={"question": _PROFILE_Q.format(code=code, name=name)})
+        if not res.get("ok"):
+            return {"ok": False, "data": None, "error": res.get("error") or "取数失败"}
+        cols, rows = _first_rows(res)
+        if not rows:
+            return {"ok": False, "data": None, "error": f"{code} 未找到基金档案"}
+        row = rows[0]
+        data: dict[str, Any] = {}
+        for col, val in zip(cols, row):
+            key = _PROFILE_KEYS.get(col)
+            if key and val not in (None, ""):
+                data.setdefault(key, val)
+        if "inception" in data:
+            data["inception"] = _d(data["inception"])
+        if "manager_since" in data:
+            data["manager_since"] = _d(data["manager_since"])
+        return {"ok": True, "data": data, "error": None}
+
+    return _cached(f"profile|{code}", produce)
+
+
+def fund_annual_stats(code: str, name: str, years: list[int]) -> dict:
+    """年度收益率 / 年度最大回撤（Wind 官方字段），返回 {ok, data:{年: {ret, mdd}}}（小数）。"""
+
+    def produce() -> dict:
+        q = f"{code} {name} 的" + "、".join(f"{y}年年度收益率、{y}年最大回撤" for y in years)
+        res = call("fund_data", "get_fund_performance", params={"question": q})
+        if not res.get("ok"):
+            return {"ok": False, "data": None, "error": res.get("error") or "取数失败"}
+        cols, rows = _first_rows(res)
+        if not rows:
+            return {"ok": False, "data": None, "error": "Wind 未返回年度字段"}
+        row = rows[0]
+        data: dict[int, dict] = {}
+        for col, val in zip(cols, row):
+            for y in years:
+                if col.startswith(f"{y}年年度收益率"):
+                    data.setdefault(y, {})["ret"] = float(val) / 100.0 if val is not None else None
+                elif col.startswith(f"{y}年最大回撤"):
+                    data.setdefault(y, {})["mdd"] = float(val) / 100.0 if val is not None else None
+        return {"ok": True, "data": data, "error": None}
+
+    return _cached(f"annual|{code}|{'-'.join(map(str, years))}", produce)
+
+
+def range_return(code: str, name: str, begin: str, end: str) -> dict:
+    """区间复权净值增长率（%），用于校验本地复算的累计收益率。"""
+
+    def produce() -> dict:
+        q = f"{code} {name} 从{begin}到{end}的复权单位净值增长率（累计区间收益率，非年化）"
+        res = call("fund_data", "get_fund_performance", params={"question": q})
+        if not res.get("ok"):
+            return {"ok": False, "value": None, "error": res.get("error") or "取数失败"}
+        cols, rows = _first_rows(res)
+        if not rows:
+            return {"ok": False, "value": None, "error": "Wind 未返回区间收益率"}
+        for col, val in zip(cols, rows[0]):
+            if ("增长率" in col or "收益率" in col) and val is not None:
+                return {"ok": True, "value": float(val) / 100.0, "error": None}
+        return {"ok": False, "value": None, "error": "区间收益率字段缺失"}
+
+    return _cached(f"range|{code}|{begin}|{end}", produce)
+
+
+def manager_funds(manager: str, company: str = "") -> dict:
+    """基金经理在管产品（含份额类别与任职日期）。返回 {ok, rows:[{code,name,appt,company}]}。"""
+
+    def produce() -> dict:
+        q = f"{company}{manager}管理的所有基金产品"
+        res = call("fund_data", "search_funds", params={"question": q})
+        if not res.get("ok"):
+            return {"ok": False, "rows": None, "error": res.get("error") or "取数失败"}
+        cols, rows = _first_rows(res)
+        if not rows:
+            return {"ok": False, "rows": None, "error": f"未找到 {manager} 的在管产品"}
+        idx = {c: i for i, c in enumerate(cols)}
+        out = []
+        for row in rows:
+            code = row[idx.get("基金代码", 1)]
+            name = row[idx.get("基金经理在管基金名称", 2)]
+            appt = row[idx.get("任职日期", 3)]
+            if str(row[idx.get("基金经理姓名", 0)]).strip() != manager.strip():
+                continue  # 名称模糊命中他人时剔除
+            out.append({"code": code, "name": name, "appt": _d(appt),
+                        "company": row[idx.get("基金经理在管基金管理人", 4)]})
+        if not out:
+            return {"ok": False, "rows": None, "error": f"{manager} 无在管产品"}
+        return {"ok": True, "rows": out, "error": None}
+
+    return _cached(f"manager|{manager}|{company}", produce)

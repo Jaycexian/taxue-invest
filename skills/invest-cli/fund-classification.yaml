@@ -1,0 +1,126 @@
+# fund-classification.yaml — 基金分类器规则真源（方案一 · 规则映射器）
+#
+# 定位（与公众号《基金评价底座的「基金分类器」Skill 实践》同构）：
+#   契约分类回答「这只基金是什么」（登记/报送/检索）；
+#   这里做的是**评价友好分类**——回答「它像什么、跟谁比、用哪把尺」。
+#   不另起一套体系：映射在 ttskill TTFUND_BASE_INFOS 已有字段之上
+#   （FTYPE + fund_classification traits + SHORTNAME），每个标签都落到可获取的底层数据。
+#
+# 三层体系（先定资产，再定产品形态，最后定策略）：
+#   L1 大类资产   权益类/混合类/固收类/货币类/跨境(QDII)/FOF/另类(商品)/另类(REITs)
+#   L2 产品形态   偏股混合型/灵活配置型/混合二级债基/指数股票型/普通货币型/QDII偏股混合型…
+#   L3 投资策略   被动指数/主动管理/指数增强/量化
+# 辅助标签       运作方式/固收+/指数型/QDII/FOF/养老/REITs/申赎状态/风险等级/目标ETF
+#
+# 资产优先原则：QDII-商品 → L1=另类(商品) 而非跨境——L1 按「主要投什么资产」判，
+# 注册属性（QDII）降为标签；QDII-债券同理归固收类。
+#
+# 改规则只改本文件；行为由 test_fund_classifier.py 的 golden 用例锁定。
+# 未见过的 FTYPE 走 prefix_rules 兜底定 L1、L2 原样透传——宁可透传原口径，不许静默编造。
+
+version: 1
+
+# ── L1 大类枚举（封闭集合；新值必须先来这里登记）────────────────────────────
+l1_enum:
+  - 权益类
+  - 混合类
+  - 固收类
+  - 货币类
+  - 跨境(QDII)
+  - FOF
+  - 另类(商品)
+  - 另类(REITs)
+
+# ── FTYPE 全文映射：产品形态字符串 → (L1, L2 规范名, 固收+) ──────────────────
+# FTYPE 口径实测（2026-09-30，ttskill TTFUND_BASE_INFOS，天天/东财系）
+ftype_rules:
+  混合型-偏股:        { l1: 混合类,      l2: 偏股混合型 }
+  混合型-偏债:        { l1: 混合类,      l2: 偏债混合型, gushou_plus: true }
+  混合型-灵活:        { l1: 混合类,      l2: 灵活配置型 }
+  混合型-平衡:        { l1: 混合类,      l2: 股债平衡型 }
+  债券型-长债:        { l1: 固收类,      l2: 中长期纯债型 }
+  债券型-中短债:      { l1: 固收类,      l2: 短债型 }
+  债券型-混合一级:    { l1: 固收类,      l2: 混合一级债基, gushou_plus: true }
+  债券型-混合二级:    { l1: 固收类,      l2: 混合二级债基, gushou_plus: true }
+  债券型-可转转债:    { l1: 固收类,      l2: 可转债型, gushou_plus: true }
+  债券型-可转债:      { l1: 固收类,      l2: 可转债型, gushou_plus: true }
+  指数型-股票:        { l1: 权益类,      l2: 指数股票型 }
+  指数型-债券:        { l1: 固收类,      l2: 指数债券型 }
+  指数型-商品:        { l1: 另类(商品),  l2: 商品指数型 }
+  股票型:             { l1: 权益类,      l2: 标准股票型 }
+  货币型-普通货币:    { l1: 货币类,      l2: 普通货币型 }
+  货币型-浮动货币:    { l1: 货币类,      l2: 浮动净值型货币 }
+  QDII-混合偏股:      { l1: 跨境(QDII),  l2: QDII偏股混合型 }
+  QDII-股票:          { l1: 跨境(QDII),  l2: QDII标准股票型 }
+  QDII-指数:          { l1: 跨境(QDII),  l2: QDII指数型 }
+  QDII-债券:          { l1: 固收类,      l2: QDII债券型 }      # 资产优先：债券资产归固收
+  QDII-商品:          { l1: 另类(商品),  l2: QDII商品型 }      # 资产优先：商品资产归另类
+  FOF-均衡型:         { l1: FOF,         l2: 均衡型FOF }
+  FOF-股票型:         { l1: FOF,         l2: 股票型FOF }
+  FOF-债券型:         { l1: FOF,         l2: 债券型FOF }
+  FOF-货币型:         { l1: FOF,         l2: 货币型FOF }
+  FOF-混合型:         { l1: FOF,         l2: 混合型FOF }
+  Reits:              { l1: 另类(REITs), l2: 公募REITs }
+
+# ── FTYPE 前缀兜底：没登记过的新形态，L1 按「资产段」判，L2 原样透传 ─────────
+prefix_rules:
+  混合型: { l1: 混合类 }
+  债券型: { l1: 固收类 }
+  股票型: { l1: 权益类 }
+  货币型: { l1: 货币类 }
+  指数型: { l1: 权益类 }     # 子段非股票时（指数型-债券/商品）由资产优先段覆盖
+  QDII:   { l1: 跨境(QDII) }
+  FOF:    { l1: FOF }
+  Reits:  { l1: 另类(REITs) }
+
+# 资产优先覆盖：FTYPE 的**资产段**（「-」后）与资产段关键词的 L1 归属，
+# 优先级高于 prefix_rules（例：指数型-商品 → 另类(商品)，不是权益类）
+asset_segment_rules:
+  商品: { l1: 另类(商品) }
+  债券: { l1: 固收类 }
+  货币: { l1: 货币类 }
+
+# ── 固收+ 判定（文章口径：以债券为底仓、叠加股票或转债增强）────────────────
+# FTYPE 在下列集合（含前缀匹配）→ 是；traits 不足以判定时以本表为准
+gushou_plus_ftype_prefixes:
+  - 债券型-混合
+  - 债券型-可转
+  - 混合型-偏债
+
+# ── L3 投资策略规则 ────────────────────────────────────────────────────────
+l3_rules:
+  index_ftype_prefixes: [指数型]        # FTYPE 命中 → 指数族（被动/增强由名称细分）
+  index_enhance_keywords: [增强]        # 名称命中 → 指数增强
+  quant_keywords: [量化, 对冲]          # 名称命中 → 量化
+  not_applicable_l1: [货币类, 另类(REITs)]   # 这两类没有策略层，L3=不适用
+  default: 主动管理                       # 其余（含 FOF）→ 主动管理
+
+# ── 名称后缀交叉复核：SHORTNAME 带类型后缀时与 FTYPE 对表，冲突并列不裁决 ──
+name_conflict_rules:
+  # 只对境内大类生效：QDII/FOF/另类基金的名称后缀（如「QDII-混合偏股」的「混合」）
+  # 是它在该段内的注册形态，与段本身不矛盾——跑了就是误报（实测 110011）
+  onshore_l1_only: [权益类, 混合类, 固收类, 货币类]
+  # 后缀（剥掉 A/C/E 类份额与括号内容后 endswith）→ L1 信号
+  suffix_to_l1:
+    混合: 混合类
+    股票: 权益类
+    债券: 固收类
+    货币: 货币类
+    FOF: FOF
+  share_suffixes: [A, B, C, D, E, I, Y]   # 份额字母，剥掉再取后缀
+
+# ── traits 布尔 → 辅助标签（fund_classification 块缺失时名称关键词兜底）────
+trait_tags:
+  is_index_fund:           { tag: 指数型 }
+  is_exchange_traded_fund: { tag: ETF }
+  is_lof:                  { tag: LOF }
+  is_qdii_fund:            { tag: QDII }
+  is_fof_fund:             { tag: FOF }
+  is_pension_fund:         { tag: 养老 }
+  is_public_reits:         { tag: REITs }
+trait_name_fallback:        # traits 块缺失时的 SHORTNAME 关键词兜底
+  is_index_fund: [指数, ETF, 联接]
+  is_exchange_traded_fund: [ETF]
+  is_lof: [LOF]
+  is_qdii_fund: [QDII]
+  is_fof_fund: [FOF, 持有]

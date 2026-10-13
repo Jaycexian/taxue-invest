@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -47,19 +48,67 @@ def _load() -> list[dict]:
         return []
     try:
         with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        return data if isinstance(data, list) else []
     except (json.JSONDecodeError, OSError):
+        # **不要把「读不出来」当成「空列表」**。自选股是用户资产：文件被
+        # 截断/损坏时返回 []，随后任意一次 add 就会用只含新标的的内容
+        # 整体覆盖写回，旧标的静默永久消失（实测复现）。
+        # 损坏时把坏文件留成 .corrupt 备份并让调用方明确看到，
+        # 而不是静默丢数据。
+        _quarantine(path)
         return []
 
 
+def _quarantine(path) -> None:
+    """把损坏的自选股文件改名留档，不删除。best-effort，不抛。
+
+    留档名带序号：固定用 `.corrupt` 会在**第二次**损坏时把上一份备份覆盖掉，
+    而上一份很可能就是唯一还含用户原始标的的那份（实测两次损坏后
+    备份 #1 内容被 #2 顶掉）。带时间戳/序号才不会互相踩。
+    """
+    try:
+        base = path.with_suffix(path.suffix + ".corrupt")
+        if not base.exists():
+            path.rename(base)
+            return
+        for i in range(1, 100):
+            cand = path.with_suffix(f"{path.suffix}.corrupt.{i}")
+            if not cand.exists():
+                path.rename(cand)
+                return
+    except OSError:
+        pass
+
+
 def _save(items: list[dict]) -> None:
+    """原子写：先写 pid 临时文件再 replace。
+
+    为什么必须原子：CLI 每进程独立，直接 `open(w)` 覆盖时若中途崩溃
+    （断电/被杀），留下的是**半截 JSON**——下一次 `_load` 读到它，
+    解析失败返回 []，再写就把用户全部自选股换成一行。自选股是本地
+    唯一的用户数据，这里没有上游可以重取。
+
+    做法与 `_common.cache_set` 一致（tmp 带 pid + replace），不再各写一套。
+    """
     path = watch_file()
+    # 路径闸：state_root/watch_file 可被 env 与测试覆盖，但不允许「..」穿越片段；
+    # tmp 必须与目标同目录、且名字是「目标名 + pid」派生，动态拼名前先拦
+    if ".." in path.parts:
+        raise ValueError(f"自选股路径含穿越片段，拒绝写入: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    if tmp.parent != path.parent or not tmp.name.startswith(path.name + "."):
+        raise ValueError(f"自选股临时路径异常，拒绝写入: {tmp}")
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def add(code: str, name: str = "", typ: str = "") -> dict:
+    _guard_pending_recovery()
     items = _load()
     code = code.strip()
     if any(i.get("code") == code for i in items):
@@ -69,7 +118,42 @@ def add(code: str, name: str = "", typ: str = "") -> dict:
     return {"source": "watchlist", "ok": True, "data": {"code": code, "added": True}, "error": None}
 
 
+def _pending_backups() -> list:
+    """列出因损坏而被留档的自选股文件。"""
+    try:
+        path = watch_file()
+        if not path.parent.is_dir():
+            return []
+        return sorted(
+            p for p in path.parent.glob(f"{path.name}.corrupt*") if p.is_file()
+        )
+    except OSError:
+        return []
+
+
+def _guard_pending_recovery() -> None:
+    """有留档未恢复时，**拒绝**任何写操作。
+
+    为什么必须拦：只留档不拦写入，用户感知到的仍然是「自选股没了」——
+    损坏 → add → 写回一条 → 原数据被覆盖（实测）。留档只有被用户看见、
+    并且写入被拦住，才能真正阻止覆盖。自选股没有上游可重取，这一步不可省。
+    恢复方式写进报错里，用户照做即可。
+    """
+    backups = _pending_backups()
+    if not backups:
+        return
+    names = "、".join(p.name for p in backups[:3])
+    more = f" 等 {len(backups)} 份" if len(backups) > 3 else ""
+    raise SystemExit(
+        f"自选股文件损坏，已留档为 {names}{more}。\n"
+        f"为避免覆盖你原有的自选股，本次写入已中止。\n"
+        f"请先手动检查并恢复备份（能解析的话改回 {watch_file().name}），"
+        f"或确认不要了再删除这些 .corrupt 文件。"
+    )
+
+
 def remove(code: str) -> dict:
+    _guard_pending_recovery()
     items = _load()
     new = [i for i in items if i.get("code") != code.strip()]
     if len(new) == len(items):
@@ -117,6 +201,22 @@ def run(action: str, code: str = "", name: str = "", typ: str = "",
         out = remove(code)
     elif action == "list":
         items = _load()
+        # 损坏留档必须在 list 里**说出来**：否则用户看到「自选列表为空」，
+        # 合理地以为从没存过，下一次 add 就把原数据覆盖掉。
+        backups = _pending_backups()
+        if backups:
+            names = "、".join(p.name for p in backups[:3])
+            more = f" 等 {len(backups)} 份" if len(backups) > 3 else ""
+            msg = (f"自选股文件损坏，内容已留档为 {names}{more}；"
+                   f"请手动检查并恢复后再做增删。")
+            if as_json:
+                print(json.dumps(
+                    {"source": "watchlist", "ok": False, "data": None,
+                     "error": msg, "corrupt_backups": [p.name for p in backups]},
+                    ensure_ascii=False, indent=2))
+                return 1
+            print(f"watchlist: {msg}", file=sys.stderr)
+            return 1
         rows = []
         for it in items:
             row = {"code": it.get("code"), "name": it.get("name", ""), "type": it.get("type", "")}

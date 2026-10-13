@@ -14,6 +14,8 @@
 """
 from __future__ import annotations
 
+from ._http import guarded_open
+
 import json
 import urllib.error
 import urllib.parse
@@ -55,7 +57,7 @@ def _docs_url() -> str:
 def _fetch_doc(api_key: str) -> dict[str, Any]:
     url = _docs_url() + "?" + urllib.parse.urlencode({"apiKey": api_key})
     req = urllib.request.Request(url, headers={"x-request-id": uuid.uuid4().hex})
-    with urllib.request.urlopen(req, timeout=CALL_TIMEOUT) as resp:
+    with guarded_open(req, CALL_TIMEOUT, allowed_host="stargate.yingmi.com") as resp:
         return json.loads(resp.read().decode("utf-8", errors="replace"))
 
 
@@ -183,7 +185,9 @@ def _request(operation: dict[str, Any], base: str, path_v: dict, query_v: dict,
         data = json.dumps(body, ensure_ascii=False).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=operation["method"])
-    with urllib.request.urlopen(req, timeout=CALL_TIMEOUT) as resp:
+    # base 可能来自 OpenAPI 文档的 servers[0].url（stargate 下发，域不定）——
+    # 白名单钉不住，靠 https + DNS 公网校验 + 禁重定向三层兜底
+    with guarded_open(req, CALL_TIMEOUT) as resp:
         text = resp.read().decode("utf-8", errors="replace")
     try:
         return json.loads(text) if text else None

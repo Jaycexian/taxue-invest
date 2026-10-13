@@ -33,7 +33,7 @@
 |------|-------------|---------|
 | 基本面分析 | invest-stock | 所有档位都调用（获取三关审查结论 + 5年核心数据） |
 | 估值/同行比较 | invest-stock（机构深度模式） | Deep 和 Formal 档位 |
-| 行业背景 | taxue-industry（L1 概览） | Deep 和 Formal 档位，当需要理解行业格局时 |
+| 行业背景 | meth-industry（L1 概览） | Deep 和 Formal 档位，当需要理解行业格局时 |
 | 一致预期/市场观点 | invest-cli（`invest-cli info` / `intent`） | Formal 档位必做，Deep 档位按需 |
 | 多视角交叉验证 | invest-discuss | 用户明确要求或标的存在高度分歧时 |
 
@@ -200,7 +200,7 @@
 
 ## 二、关键事实
 
-### 2.1 行业格局（基于 taxue-industry 输出）
+### 2.1 行业格局（基于 meth-industry 输出）
 - 行业规模/增速：__
 - 竞争格局：__
 - 关键趋势：__
@@ -345,4 +345,4 @@
 
 ---
 
-*IC 研报参考 v2.0 · 三档位 · 灵魂三问自检 · 依赖 invest-stock + taxue-industry + invest-cli*
+*IC 研报参考 v2.0 · 三档位 · 灵魂三问自检 · 依赖 invest-stock + meth-industry + invest-cli*

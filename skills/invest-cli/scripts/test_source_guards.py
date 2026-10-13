@@ -798,13 +798,22 @@ def test_wind_api_key_agrees_with_detect_on_rc_key(monkeypatch, tmp_path) -> Non
 # 每次 screen/港股取数却报「未设置 EASTMONEY_APIKEY」，排障被带偏。
 
 def test_eastmoney_detect_uses_loader_not_file_existence(monkeypatch, tmp_path) -> None:
-    """空凭据文件（只有注释）不得被判可用。"""
-    from sources import eastmoney
+    """空凭据文件（只有注释）不得被判可用。
+
+    **必须把 launchctl / shell rc 两条外部读取一并掐断**：load_api_key 走
+    `read_env`，而 read_env 依次读 进程环境 → launchctl → ~/.zshrc 等 rc 文件。
+    只 monkeypatch credential_files + delenv 是不够的——本机 launchctl 里
+    真的有 EASTMONEY_APIKEY 时，断言 `load_api_key() == ""` 读到的是**开发机
+    的真 key**，用例在有凭据的机器上一律红（实测本机就是如此），而在没配
+    凭据的机器上恒绿。一个只在特定机器上失败的测试，测的是机器不是代码。
+    """
+    from sources import eastmoney, env
 
     envfile = tmp_path / "eastmoney.env"
     envfile.write_text("# 只有注释，没有 key\n", encoding="utf-8")
     monkeypatch.setattr(eastmoney, "credential_files", lambda: [envfile])
-    monkeypatch.delenv(eastmoney.ENV_KEY, raising=False)
+    monkeypatch.setattr(env, "read_env", lambda _name: "")  # 掐断 进程环境/launchctl/rc
+    monkeypatch.setattr(env, "read_credential_file", lambda _k, _f: "")
 
     assert eastmoney.load_api_key() == "", "前提失效：加载器竟然读到了 key"
     ok, detail = eastmoney.detect()
@@ -891,3 +900,183 @@ def test_hithink_marks_ambiguity_as_input_error(monkeypatch) -> None:
     # 反向：普通错误不得被标记（否则会把可回退的失败也终止掉）
     assert "input_error" not in hithink._envelope("fund", False, error="HTTP 500")
     assert "input_error" not in hithink._envelope("fund", True, data={})
+
+
+# ── 8. tencent：模糊名称解析必须有置信门槛 + 空行不得当行情
+#
+# 实测缺陷（2026-10-07）：
+#   `stock zzzz` → 中证转债(000832)、`stock foo` → Food Culture Inc(FCUL.PS)、
+#   `stock test` → 变革性科技加速器ETF、`kline zzzz` → 中证转债日K，全部 rc=0。
+#   根因：腾讯 smartbox 是模糊检索（全拼/拼音首字母/英文缩写都算命中），对**任何**
+#   输入都回一个「最像的」，而旧实现无任何校验直接采用——打错的输入被当成「查到了」。
+#   `us ZZZZ` → 上游回 price=0.0 的全零行，旧占位判据 `if not price: return False`
+#   恰好放行，于是一个不存在的 ticker 拿到了「有效快照」，同样 rc=0。
+
+
+def _fake_search(hits):
+    def _search(keyword, limit=10):
+        return [dict(h) for h in hits]
+    return _search
+
+
+def test_tencent_fuzzy_garbage_is_rejected(monkeypatch) -> None:
+    """接口为噪音输入回了一个无关标的 → 必须判「没这个标的」。"""
+    from sources import tencent
+
+    monkeypatch.setattr(tencent, "search", _fake_search([
+        {"market": "sh", "code": "000832", "symbol": "sh000832",
+         "name": "中证转债", "type": "ZS", "alias": ""},
+    ]))
+    assert tencent.resolve_name("zzzz") == ""
+
+
+def test_tencent_word_prefix_is_rejected(monkeypatch) -> None:
+    """`foo` 不得命中 `Food Culture Inc`（词前缀不是词）。"""
+    from sources import tencent
+
+    monkeypatch.setattr(tencent, "search", _fake_search([
+        {"market": "us", "code": "FCUL.PS", "symbol": "usFCUL",
+         "name": "Food Culture Inc", "type": "GP", "alias": ""},
+    ]))
+    assert tencent.resolve_name("foo") == ""
+
+
+def test_tencent_cjk_name_and_alias_still_resolve(monkeypatch) -> None:
+    """反向用例：中文名与英文缩写必须照常解析（守卫不能修成一律拒绝）。"""
+    from sources import tencent
+
+    monkeypatch.setattr(tencent, "search", _fake_search([
+        {"market": "sh", "code": "600519", "symbol": "sh600519",
+         "name": "贵州茅台", "type": "GP-A", "alias": ""},
+    ]))
+    assert tencent.resolve_name("茅台") == "sh600519"
+
+    monkeypatch.setattr(tencent, "search", _fake_search([
+        {"market": "hk", "code": "01288", "symbol": "hk01288",
+         "name": "农业银行", "type": "GP", "alias": "ABC"},
+    ]))
+    assert tencent.resolve_name("abc") == "hk01288", "英文缩写是接口给的别名，属可验证命中"
+
+
+def test_tencent_market_preference_survives_the_gate(monkeypatch) -> None:
+    """闸门只删噪音，不改变「境内市场优先」的既有排序。"""
+    from sources import tencent
+
+    monkeypatch.setattr(tencent, "search", _fake_search([
+        {"market": "us", "code": "ASHR.PS", "symbol": "usASHR",
+         "name": "沪深300 ETF-Xtrackers", "type": "GP-ETF", "alias": ""},
+        {"market": "sh", "code": "000300", "symbol": "sh000300",
+         "name": "沪深300", "type": "ZS", "alias": ""},
+    ]))
+    assert tencent.resolve_name("沪深300") == "sh000300"
+
+
+def test_tencent_all_zero_row_is_placeholder() -> None:
+    """价格与量额全 0 的空行必须判为无行情（旧判据放行了它）。"""
+    from sources import tencent
+
+    assert tencent.is_placeholder(
+        {"price": 0.0, "open": 0.0, "high": 0.0, "low": 0.0, "volume": 0, "amount": 0}
+    ), "全零行 = 没有有效行情"
+    assert tencent.is_placeholder({"price": None}), "缺价格同样没有有效行情"
+    # 反向：正常行不得被误判
+    assert not tencent.is_placeholder(
+        {"price": 1680.0, "open": 1670.0, "high": 1690.0, "low": 1660.0,
+         "volume": 24573, "amount": 1e9}
+    )
+    # 有价无量额（停牌）仍是占位行
+    assert tencent.is_placeholder(
+        {"price": 1680.0, "open": 0, "high": 0, "low": 0, "volume": 0, "amount": 0}
+    )
+
+
+def test_tencent_us_unknown_ticker_errors_not_empty_snapshot(monkeypatch) -> None:
+    """未知美股代码回全零行 → us() 必须报错，不得给「有效快照」。"""
+    from sources import tencent
+
+    monkeypatch.setattr(tencent, "_codes_for", lambda s: (["usZZZZ"], []))
+    monkeypatch.setattr(tencent, "_fetch_with_alt", lambda codes: [
+        {"code": "ZZZZ.N", "name": "ZZZZ", "price": 0.0, "open": 0.0,
+         "high": 0.0, "low": 0.0, "volume": 0, "amount": 0},
+    ])
+    res = tencent.us("ZZZZ")
+    assert res["ok"] is False
+    assert "没有有效行情" in (res["error"] or "")
+
+
+# ── 9. 结构类取数必须落盘缓存（cn / westock 透传）
+#
+# 实测：`westock notice list sh600519` 上游 375ms/次，而这两条路径此前**完全没有
+# 缓存**——同一会话里重复问同一只股，每次都重付一遍（cn 108 次、westock 66 次调用）。
+
+
+def test_cn_structural_fetch_is_cached(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("INVEST_CLI_CACHE_DIR", str(tmp_path))
+    import cmd_cn
+
+    calls = {"n": 0}
+
+    def _fake_envelope(action, args):
+        calls["n"] += 1
+        return {"source": "westock", "kind": cmd_cn._SPECS[action][1], "ok": True,
+                "data": {"command": "westock " + " ".join(args),
+                         "output": "| 列A | 列B |\n|---|---|\n| 1 | 2 |"},
+                "error": None}
+
+    monkeypatch.setattr(cmd_cn, "_westock_envelope", _fake_envelope)
+
+    r1 = cmd_cn._westock_envelope_cached("notice", ["notice", "list", "sh600519"], "sh600519", "", 0, 0)
+    r2 = cmd_cn._westock_envelope_cached("notice", ["notice", "list", "sh600519"], "sh600519", "", 0, 0)
+    assert calls["n"] == 1, "第二次必须命中缓存，不得重付上游"
+    assert r2.get("cached") is True
+    assert r2["data"]["output"] == r1["data"]["output"], "缓存命中也必须原样带回载荷"
+
+    # 不同 key 不得串味
+    cmd_cn._westock_envelope_cached("holders", ["shareholder", "sh600519"], "sh600519", "", 0, 0)
+    assert calls["n"] == 2
+
+
+def test_cn_failure_is_not_cached(monkeypatch, tmp_path) -> None:
+    """失败不得进缓存（否则一次上游抖动会被放大成持续失败）。"""
+    monkeypatch.setenv("INVEST_CLI_CACHE_DIR", str(tmp_path))
+    import cmd_cn
+
+    calls = {"n": 0}
+
+    def _fake_envelope(action, args):
+        calls["n"] += 1
+        return {"source": "westock", "kind": cmd_cn._SPECS[action][1], "ok": False,
+                "data": None, "error": "上游 500"}
+
+    monkeypatch.setattr(cmd_cn, "_westock_envelope", _fake_envelope)
+    cmd_cn._westock_envelope_cached("notice", ["notice", "list", "sh600519"], "sh600519", "", 0, 0)
+    cmd_cn._westock_envelope_cached("notice", ["notice", "list", "sh600519"], "sh600519", "", 0, 0)
+    assert calls["n"] == 2, "失败必须重试，不得缓存"
+
+
+def test_westock_passthrough_cached_but_help_is_not(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("INVEST_CLI_CACHE_DIR", str(tmp_path))
+    from sources import westock
+
+    calls = {"n": 0}
+
+    def _fake_run(norm, timeout=westock._TIMEOUT):
+        calls["n"] += 1
+        return "| 列A | 列B |\n|---|---|\n| 1 | 2 |"
+
+    monkeypatch.setattr(westock, "_run", _fake_run)
+    monkeypatch.setattr(westock, "normalize_args", lambda sub: list(sub))
+
+    westock.call(["chip", "sh600519"])
+    westock.call(["chip", "sh600519"])
+    assert calls["n"] == 1, "同一命令重跑必须命中缓存"
+
+    # 帮助请求本就便宜且要新鲜 → 不缓存
+    westock.call(["--help"])
+    westock.call(["--help"])
+    assert calls["n"] == 3
+
+    # 取值域查询同理不缓存
+    westock.call(["screen", "strategy", "--list"])
+    westock.call(["screen", "strategy", "--list"])
+    assert calls["n"] == 5

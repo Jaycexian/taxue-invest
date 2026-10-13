@@ -18,6 +18,8 @@
 | 东方财富 | API | stock / fund / screen | 50 | 设置 `EASTMONEY_APIKEY` |
 | Yahoo Finance（yfinance） | python | us | 40 | 安装 `yfinance` |
 | SEC EDGAR（美股财报原文） | API | us 财报原文（10-K XBRL 指标 + 申报清单） | 45 | 免费无 key（可选 `SEC_EDGAR_USER_AGENT` 声明身份）；`invest-cli sec <代码>` 直取，不经快照链 |
+| Financial Modeling Prep（fmp） | API | us_fundamentals / us_estimates / us_rating / dividends | 46 | `FMP_API_KEY` 或 `~/.config/invest-cli/fmp.env`；`invest-cli fmp <代码>` 直取，不经快照链（免费档 250 次/天） |
+| Tiingo（美股 EOD） | API | us / eod_history | 36 | `TIINGO_API_KEY` 或 `~/.config/invest-cli/tiingo.env`；EOD 历史专项 `invest-cli us <代码> --history` |
 | Bitget rToken | API | us（仅行情） | 35 | 始终可用（公开 API，无 key，stdlib） |
 | 天天基金（直连 gateway，可选深取引擎） | API | fund（同类分位/机构占比/在管列表深取） | 55 | 官方凭据未过期（Keychain）+ 已装业务包；缺省自动跳过（主路=自带 hithink>eastmoney） |
 
@@ -37,9 +39,9 @@
 | 选股（多条件筛选） | 强 | — | — | 强（自然语言） | — | — | — |
 | 美股行情 | 强 | — | — | — | 强 | 中（rToken/USDT，非官方价） | — |
 | 美股财务 | 强 | — | — | — | 强 | — | — |
-| 基金净值/业绩/风险 | 强 | 强 | 强 | 强 | — | — | 中 |
+| 基金净值/业绩/风险 | 强（复权净值，单次 100 行硬顶需分段） | 强 | 强 | 强 | 强（成立来全量 1 次调用；成立后前 6 周为周频、日增长率 2 位小数） | — | 中 |
 | 基金重仓/持仓穿透 | 强 | 中 | 强 | 强 | — | — | 中 |
-| 基金经理画像/产品对比 | 强 | 中 | 中（经理列表） | 中 | — | — | — |
+| 基金经理画像/产品对比 | 强 | 中 | 中（经理列表） | 中 | 强（MANAGER_INFO：在管清单含任职日/规模/任职回报） | — | — |
 | 策略/组合筛选 | 中 | 强（策略、持仓） | — | — | — | — | — |
 | 财富规划/资产配置 | 中 | 强（wealth-* 场景） | — | — | — | — | — |
 | 宏观/行业/汇率指标 | 强（economic_data） | 中 | — | — | — | — | — |
@@ -66,7 +68,7 @@
 
 | 类别 | 数据源 | 特点 | 用在哪 |
 | --- | --- | --- | --- |
-| 结构化权威 | 盈米 / Wind / 同花顺 / 东财 / yfinance / SEC EDGAR / Bitget(rToken 行情) | 精确但限额、部分需 key（SEC 免费无 key） | 净值 / 行情 / 财务 / 财报原文 / 筛选 / 配置 |
+| 结构化权威 | 盈米 / Wind / 同花顺 / 东财 / yfinance / SEC EDGAR / FMP / Tiingo / Bitget(rToken 行情) | 精确但限额、部分需 key（SEC 免费无 key） | 净值 / 行情 / 财务 / 财报原文 / EOD 历史 / 筛选 / 配置 |
 | 检索资讯 | argo（eastmoney/zhihu/cninfo/财经垂直源） | 广覆盖、低成本、需核验 | 资讯 / 舆情 / 宏观背景 / 观点；结构化源兜底 |
 
 **降级链**：结构化源 → 同域其他结构化源 → `invest-cli info <词>`（argo 检索，结果需核验）。
@@ -129,12 +131,26 @@ export EASTMONEY_APIKEY=你的_key
 ### 美股
 
 ```bash
-pip3 install yfinance
+uv pip install yfinance
 ```
 
 启用能力：`invest-cli us`（yfinance 全量快照：估值/财务/评级）。
 
-**Bitget rToken 报价兜底**（无需配置）：公开行情 API，stdlib 即可。未装 yfinance 或取数失败时，`invest-cli us` / `intent deep us` 自动回退到 Bitget，输出为 USDT 代币价（`quote_type=rtoken`），**不是**美股交易所官方报价。美股行情降级链：**yfinance → 腾讯行情 → bitget**（Wind 只走 `invest-cli wind` 透传，不在快照链上，运行时链以 `invest-cli datasources` 的 `_chains` 为准）。
+**Bitget rToken 报价兜底**（无需配置）：公开行情 API，stdlib 即可。未装 yfinance 或取数失败时，`invest-cli us` / `intent deep us` 自动回退，输出为 USDT 代币价（`quote_type=rtoken`），**不是**美股交易所官方报价。美股行情降级链：**yfinance → 腾讯行情 → Tiingo → bitget**（Wind 只走 `invest-cli wind` 透传，不在快照链上，运行时链以 `invest-cli datasources` 的 `_chains` 为准）。
+
+### Tiingo（美股 EOD：官方收盘价/复权历史/估值序列，免费档）
+
+```bash
+export TIINGO_API_KEY=...   # 或用户级文件 ~/.config/invest-cli/tiingo.env（TIINGO_API_KEY=...）
+```
+
+- **免费档实测边界（2026-09-29）**：EOD 日线（OHLCV + adjClose + divCash + splitFactor）、
+  标的元数据、日频估值序列（市值/PE/PB/PEG，约 3 年）、IEX 桥收盘报价（tngoLast）可用；
+  **新闻与三表在付费墙内**——美股财报走 SEC EDGAR，别在 Tiingo 上找
+- **链上位次（36，tencent 37 与 bitget 35 之间）**：收盘口径压不过腾讯实时（盘中查快照
+  腾讯价更新），但官方交易所数据严格优于 rToken 代币价
+- **专项入口**：`invest-cli us <代码> --history [--years N]`——EOD 历史 + 分红/拆股/回撤
+  摘要。快照链其余源都不给可靠复权历史，这是 Tiingo 在本仓的**独有贡献**
 
 ### 腾讯行情（零鉴权，多市场实时行情）
 
@@ -153,22 +169,67 @@ pip3 install yfinance
   换手率 A股在 [38]、港股在 [59]；成交额 A股是万元而港美股是元）。
   适配器按市场分表并只登记已用独立源核对过的下标，见 `scripts/sources/tencent.py`
 
-### SEC EDGAR（美股财报原文，免费官方源）
+### SEC EDGAR（美股原文级数据，免费官方源）
 
 无需任何配置（SEC 官方公开 API）。建议设置真实联系方式（SEC 要求 UA 含邮箱，www.sec.gov 域不带邮箱会 403；默认用占位邮箱通过校验）：
 
 ```bash
 export SEC_EDGAR_USER_AGENT="your-name your@email"
-invest-cli sec AAPL                  # 终端可读输出
-invest-cli sec AAPL --json           # 结构化（给分析层）
-invest-cli sec MSFT --forms 10-K --filings 3
+invest-cli sec AAPL                       # 快照：24 项指标 + 近 5 年序列 + 申报清单
+invest-cli sec AAPL --json                # 结构化（给分析层）
+invest-cli sec AAPL --quarterly --years 8 # 附季度序列（Q4 为推导值，标 derived）
+invest-cli sec AAPL --search "supply chain" --forms 10-K --limit 5   # 全文检索 + 原文段落
+invest-cli sec AAPL --insiders --days 90  # Form 4 内部人交易逐笔
+invest-cli sec AAPL --events --days 365   # 8-K 逐事项 + 13D/13G 权益变动
+invest-cli sec BRK --holdings             # 13F 机构持仓（机构名/CIK/代码均可）
 ```
 
-- 取数：10-K 年报 XBRL 关键指标（营收/净利/营业利润/毛利/经营现金流/总资产/股东权益/EPS）+ 最近申报清单（带 edgar 原文链接）
-- 口径：只取 `form=10-K` + `fp=FY`；时长型事实限 300~400 天（季度值不进）；标签漂移按优先级回退
-- 缓存：`~/Library/Caches/invest-cli/sec/`（ticker 映射 7 天、companyfacts 24h、submissions 6h）
-- 边界：仅美股发行人；20-F（外国私人发行人）与基金 N-CSR 不在覆盖内，会明确报错
+- 快照：24 项年报指标（含负债/现金/资本开支/回购分红/研发/流通股数；自由现金流为派生，只在同期间两值都在时产出）+ 近 N 年年度序列（三关趋势表直接可用）+ 申报清单
+- 全文检索：EDGAR full-text search（`efts.sec.gov`，2001 年起全部申报）；多词自动按短语检索；前 5 条命中拉原文抽段落（抽不到留空，不编造上下文）
+- 内部人：Form 4 XML 逐笔解析（交易代码 → 中文标签、买/卖方向、交易后持股），含期权行权与代扣税行
+- 事件：8-K 的 `items` 字段逐事项展开（业绩发布 2.02 / 高管变动 5.02 / 协议 1.01 / 减值 2.06 / 退市 3.01…）+ 13D/13G 权益变动
+- 13F：按 (CUSIP, put/call) 聚合（同一 CUSIP 多子管理人分行申报会合并），带占比；金额单位随申报期标注（SEC 2023-01 起改美元，此前为千美元）
+- 口径：只取 `form=10-K` + `fp=FY`；时长型事实限 300~400 天（季度值不进年度结果）；标签漂移按优先级回退；四个动作旗标**互斥**（一次只做一件事）
+- 缓存：`~/Library/Caches/invest-cli/sec/`（ticker 映射 7 天、companyfacts 24h、submissions 6h、申报原文 7 天、全文检索 1h）
+- 边界：仅美股发行人；20-F（外国私人发行人）与基金 N-CSR 不在覆盖内，会明确报错；13F 只含美国多头与期权（不含空头）
 - 定位：与 Wind / yfinance 数字交叉验证的原文级依据；**不经快照链**（`route.pick` 只认 stock/fund/us/screen 方法）
+
+### FMP（美股深取：三表 JSON/TTM 比率/结构化评级/年度预测，免费档）
+
+```bash
+export FMP_API_KEY=...   # 或用户级文件 ~/.config/invest-cli/fmp.env（FMP_API_KEY=...）
+```
+
+- **免费档边界（2026-09-30 实测，/stable 版）**：quote（50/200 日均线）、profile
+  （sector/industry/CEO/员工/CIK/ISIN/上市日）、三表 annual、key-metrics-ttm（EV 系）、
+  ratios-ttm（利润率/流动性/杠杆/股息；**ROE/ROA=null**，免费档不给）、
+  ratings-snapshot（字母评级 + DCF/ROE/ROA/负债/PE/PB 六维分项分）、
+  analyst-estimates（**annual 通，quarterly 402**）、dividends 历史 + 市场级分红日历、
+  historical-price-eod/full（约 5 年）。**锁**：etf-holdings 明确付费墙；
+  peers/press-releases/insider-trading/sec-filings 在 stable 下 404
+- **错误形态**：缺/坏 key → 401；付费端点 → 402 "Restricted Endpoint"；
+  **查无此票 → 也是 402**（"Premium Query Parameter"），适配器按文案分流成「未找到标的」；
+  超限 → 429 文案里带 250 次/天
+- **定位**：深取专项（priority 46，sec_edgar 旁边），**不进快照链**——250 次/天
+  扛不住日常兜底消耗，一次深取 3-5 个请求。与 sec_edgar 分工：sec 原文级（官方免费），
+  fmp 加工好的比率/评级/预测；与 yfinance/Tiingo 数字交叉验证
+
+### CN 市场结构（`cn` 子命令：westock 高频五个 + 巨潮检索）
+
+```bash
+invest-cli cn notice 600519 --limit 20       # 公告列表（可 --type 过滤、--offset 翻页）
+invest-cli cn notice --search "会计政策变更"  # 巨潮（cninfo）关键词检索，走 argo
+invest-cli cn consensus 600519,000858        # 一致预期（目标价 + 年度预测）
+invest-cli cn holders 600519                 # 股东研究（十大股东 + 变动）
+invest-cli cn disclosure 600519              # 财报披露日历（预约披露日）
+invest-cli cn report 600519 --limit 20       # 研报列表
+```
+
+- 数据源：westock（腾讯微证券）对应子命令；`--search` 走 argo 的 `cninfo` 引擎（**不**自建巨潮抓取，先复用 argo；覆盖不足再考虑直连接口）
+- 结构化：`--json` 把 westock 的 markdown 表格解析成 `tables[].rows`（按字段取值），**原文始终保留在 `raw`**（解析失败不丢数据）；终端仍按表格展示
+- 降级：公告列表在 westock 通道故障时回退 argo/cninfo 检索，并在 `note` 里标明「检索非完整清单」
+- 代码归一：逗号分隔多代码逐个归一（`600519,000858` → `sh600519,sz000858`），中文名可直用
+- 收敛登记：`invest-cli capabilities westock` 列已收敛的五个；长尾 40+ 子命令仍走 `invest-cli westock <子命令>` 透传（chip/lhb/events/industry-chain…）
 
 ### FRED（宏观时序，可选 key）
 

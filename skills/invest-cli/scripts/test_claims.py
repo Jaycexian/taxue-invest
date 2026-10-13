@@ -30,7 +30,7 @@ LIVE_DOCS = [
     SKILLS_ROOT / "invest-macro" / "SKILL.md",
 ]
 
-INFRA_MODULES = {"__init__", "registry", "route", "env"}
+INFRA_MODULES = {"__init__", "registry", "route", "env", "_http"}
 
 
 def test_yaml_adapters_bijection() -> None:

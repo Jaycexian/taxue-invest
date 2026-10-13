@@ -1,0 +1,16 @@
+# invest 推理档位配置（公开默认）
+# 本机覆盖：references/mode.local.yaml（优先级更高，不随公开版分发）
+
+mode: low
+
+# 档位行为说明（供 agent 读取）
+levels:
+  low:
+    max_fetches: 2
+    output: brief       # 终端简洁结论
+  medium:
+    max_fetches: 4
+    output: summary     # 要点列表 + 简要分析
+  high:
+    max_fetches: 99
+    output: full_report # mx-templates 完整报告

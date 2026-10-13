@@ -1,0 +1,31 @@
+{
+  "name": "@taxueseek/invest-cli-dsh",
+  "version": "1.0.0",
+  "description": "invest-cli — DSH 插件：把 invest-cli 的 21 个子命令收敛为**单个** invest 工具（CLI 单发），行情/财报/基金/美股/SEC/A股结构一次可达。安装：dsh plugin --profile web add \"file:<invest-cli>/packages/dsh-plugin\"",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dsh/index.js",
+  "exports": {
+    ".": "./dsh/index.js",
+    "./dsh": "./dsh/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dsh",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "check": "node --check dsh/index.js",
+    "test": "node --test test/index.test.js"
+  }
+}

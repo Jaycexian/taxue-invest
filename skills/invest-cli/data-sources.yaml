@@ -48,6 +48,22 @@ sources:
         - ~/Library/Application Support/invest-cli/eastmoney.env
     adapters: [eastmoney]
 
+  mxds:
+    name: 妙想(MX) MCP
+    kind: api
+    # coverage 是语义标签：us 于 2026-10-11 移出快照链——妙想是「自然语言→表格」
+    # 服务，单次 1.2s+ 且快照查询只回收盘价简表，tencent 全字段行情 189ms 更适合
+    # 链首（修复裸 ticker 适配后数据质量仍不占优，实测同日）。妙想美股能力经
+    # `intent mxds` 自然语言入口可达（us() 已对裸 ticker 包装查询模板）。
+    coverage: [stock, fund, screen, bond, index, macro, news, notice]
+    priority: 55
+    env_var: EM_API_KEY
+    detect:
+      type: env_or_file
+      files:
+        - ~/.config/invest-cli/mxds.env
+    adapters: [mxds]
+
   yfinance:
     name: Yahoo Finance
     kind: python
@@ -95,6 +111,24 @@ sources:
       type: env_or_file
       files: []
     adapters: [tencent]
+
+  tiingo:
+    name: Tiingo 美股 EOD（官方收盘价/复权历史/估值序列）
+    kind: api
+    coverage: [us, eod_history]
+    # priority 36 卡在 tencent(37) 与 bitget(35) 之间，与 tencent 的 37 一样是
+    # 有意取的数：免费档无三表无 ROE，tngoLast 是收盘口径（盘中不如腾讯实时）
+    # ——上 37 就是能力降级；压 bitget 是官方交易所收盘价 vs 代币价，严格更优。
+    # us 链 → [mxds(55，配了才在), yfinance(40), tencent(37), tiingo(36), bitget(35)]
+    priority: 36
+    env_var: TIINGO_API_KEY
+    # 与 fred/eastmoney 同一解析链（env → launchctl → rc → 凭据文件，剥引号）
+    detect:
+      type: env_or_file
+      files:
+        - ~/.config/invest-cli/tiingo.env
+        - ~/Library/Application Support/invest-cli/tiingo.env
+    adapters: [tiingo]
 
   westock:
     name: 腾讯微证券 CLI（长尾能力透传）
@@ -163,6 +197,26 @@ sources:
       files: []
     adapters: [argo]
 
+  fmp:
+    name: Financial Modeling Prep（美股深取：三表 JSON/TTM 比率/结构化评级/年度预测）
+    kind: api
+    # coverage 是语义标签（非快照链 kind）：不暴露 us() 方法，**不进快照链**——
+    # 免费档 250 次/天扛不住日常兜底消耗（一次深取就 3-5 个请求）。与 sec_edgar
+    # 分工：sec=10-K XBRL 原文级（官方免费），fmp=加工好的比率/评级/预测（免费档
+    # 250 次/天 + 30 天 500MB 带宽）。经 `invest-cli fmp <ticker>` 直取。
+    # 免费档边界（2026-09-30 实测）：三表 annual 通、quarterly 402；ratios-ttm 的
+    # ROE/ROA=null（要从三表自己算）；estimates 仅 annual；etf-holdings 明确付费墙。
+    coverage: [us_fundamentals, us_estimates, us_rating, dividends]
+    priority: 46
+    env_var: FMP_API_KEY
+    # 与 fred/tiingo 同一解析链（env → launchctl → rc → 凭据文件，剥引号）
+    detect:
+      type: env_or_file
+      files:
+        - ~/.config/invest-cli/fmp.env
+        - ~/Library/Application Support/invest-cli/fmp.env
+    adapters: [fmp]
+
   sec_edgar:
     name: SEC EDGAR 美股财报（10-K XBRL 原文 + 申报清单）
     kind: api
@@ -187,3 +241,26 @@ sources:
         - ~/.config/invest-cli/fred.env
         - ~/Library/Application Support/invest-cli/fred.env
     adapters: [fred]
+
+  index_hub:
+    name: 易方达指数直通车
+    kind: api
+    coverage: [fund, index]
+    priority: 65
+    env_var: INDEX_HUB_API_KEY
+    # 直连易方达 Index Hub API；可用性 = 有 Key + api_client.py 已安装
+    detect:
+      type: env_or_file
+      files:
+        - ~/.config/index-hub/api_key
+    adapters: [index_hub]
+
+  etfirst:
+    name: 首趋E指
+    kind: cli
+    coverage: [fund, index, etf_detail, valuation, industry_distribution, wind_rank]
+    priority: 63
+    detect:
+      type: command
+      check: etfirst
+    adapters: [etfirst]

@@ -26,6 +26,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Optional
 
+from ._http import guarded_open
+
 SOURCE_LABEL = "FRED 宏观序列"
 API_BASE = "https://api.stlouisfed.org/fred/series/observations"
 GRAPH_CSV_BASE = "https://fred.stlouisfed.org/graph/fredgraph.csv"
@@ -62,19 +64,13 @@ def _file_has_key(path: Path) -> bool:
 
 
 def load_api_key() -> Optional[str]:
-    from .env import read_env
+    from .env import read_credential_file, read_env
 
     val = read_env(ENV_KEY)
     if val:
         return val
-    for p in credential_files():
-        try:
-            for line in p.read_text(encoding="utf-8").splitlines():
-                if line.startswith(f"{ENV_KEY}="):
-                    return line.split("=", 1)[1].strip()
-        except OSError:
-            continue
-    return None
+    # 与 eastmoney 共用同一解析（剥引号），见 env.read_credential_file 注释
+    return read_credential_file(ENV_KEY, credential_files()) or None
 
 
 def detect() -> tuple[bool, str]:
@@ -89,7 +85,7 @@ def _fetch_series(series_id: str, api_key: str) -> tuple[Optional[list[dict[str,
     )
     url = f"{API_BASE}?{qs}"
     try:
-        with urllib.request.urlopen(url, timeout=DEFAULT_TIMEOUT) as resp:
+        with guarded_open(url, DEFAULT_TIMEOUT, allowed_host="api.stlouisfed.org") as resp:
             body = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         return None, f"FRED HTTP {e.code}: {e.reason}"
@@ -127,7 +123,7 @@ def _fetch_series_keyless(
     last_err = ""
     for attempt in range(max(1, retries)):
         try:
-            with urllib.request.urlopen(url, timeout=DEFAULT_TIMEOUT) as resp:
+            with guarded_open(url, DEFAULT_TIMEOUT, allowed_host="fred.stlouisfed.org") as resp:
                 body = resp.read().decode("utf-8", errors="replace")
             break
         except urllib.error.HTTPError as e:

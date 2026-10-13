@@ -101,6 +101,35 @@ def _launchctl_getenv(name: str) -> str:
     return val
 
 
+def read_credential_file(key: str, files) -> str:
+    """从凭据文件里读 `KEY=VALUE` 的 VALUE（正确去引号）。
+
+    为什么需要它：eastmoney.py 与 fred.py 各自内联了
+    `line.split("=", 1)[1].strip()`，**不剥引号**；而 hithink.py / wind.py
+    与本模块的 `_unquote` 都剥。同一个仓库三种行为，用户把 key 写成
+    带引号的形式（在 rc 与编辑器里都很常见）时，
+    那两个源把引号当成 key 的一部分发出去 → 鉴权失败，而 detect() 仍报
+    「已配置」——一个看起来配好了、实际永远取不到数的假可用信号。
+
+    收敛到这一个函数，三处调用点共用 `env.py` 已经验证过的 `_unquote`。
+    """
+    for p in files:
+        try:
+            text = Path(p).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            if k.replace("export", "").strip() == key:
+                val = _unquote(v)
+                if val:
+                    return val
+    return ""
+
+
 def read_env(name: str) -> str:
     """按 进程环境 → launchctl(Mac) → shell rc 顺序读取，命中即返。"""
     val = os.environ.get(name, "").strip()

@@ -24,6 +24,8 @@
 """
 from __future__ import annotations
 
+from ._http import guarded_open
+
 import base64
 import hashlib
 import json
@@ -223,7 +225,8 @@ def _invoke(skill_id: str, body: dict[str, Any], action: str = "query") -> dict[
             **_sign_headers("POST", INVOKE_PATH, data, session_id, pem),
         }
         req = urllib.request.Request(GATEWAY + INVOKE_PATH, data=data, headers=headers, method="POST")
-        with urllib.request.urlopen(req, timeout=INVOKE_TIMEOUT) as resp:
+        with guarded_open(req, INVOKE_TIMEOUT,
+                          allowed_host="skills-api.tiantianfunds.com") as resp:
             return json.loads(resp.read().decode("utf-8", errors="replace"))
 
     try:
@@ -295,6 +298,20 @@ def resolve_fcode(keyword: str) -> tuple[str, str]:
         if (c.get("display_code") or "").isdigit() and _common_run(kw, name) >= threshold:
             return c["display_code"], name or kw
     raise RuntimeError(f"基金搜索无相关候选: {kw}")
+
+
+def search_funds(query: str, page_index: int = 1, page_size: int = 50) -> dict[str, Any]:
+    """TTFUND_SEARCH 分页搜索（研究管线用；候选只有名称/类别/可购状态，无业绩字段）。
+
+    注意：query 是**名称子串匹配**，不是语义检索（2026-10-11 实测教训），
+    调用方要先提炼关键词再进来。返回标准信封，data 含 candidates/total_count。
+    """
+    try:
+        raw = _invoke("TTFUND_SEARCH", {"query": query, "search_type": "fund",
+                                        "page_index": page_index, "page_size": page_size})
+    except RuntimeError as e:
+        return {"source": "ttskill", "ok": False, "data": None, "error": str(e)}
+    return {"source": "ttskill", "ok": True, "data": raw.get("data") or {}, "error": None}
 
 
 def _base_snapshot(code: str) -> dict[str, Any]:
@@ -421,3 +438,215 @@ def fund(keyword: str) -> dict[str, Any]:
 if __name__ == "__main__":  # 快速自检：python3 sources/ttskill.py 110011
     code = sys.argv[1] if len(sys.argv) > 1 else "110011"
     print(json.dumps(fund(code), ensure_ascii=False, indent=2, default=str)[:1500])
+
+
+def manager_funds(manager: str) -> dict:
+    """经理在管产品（ttskill MANAGER_INFO）：含任职日 FEMPDATE。
+
+    这是 Wind search_funds 的降级替代：字段更全（规模/任职回报/1年收益），
+    但**份额类别要自己从名称推**（上游给的是 FCODE+SHORTNAME），且没有「公司」入参。
+    """
+    from _common import CACHE_TTL_FUNDAMENTAL, cache_get, cache_set
+
+    key = f"mgr|{manager}"
+    hit = cache_get("tenure", key, CACHE_TTL_FUNDAMENTAL)
+    if hit is not None:
+        return hit
+    try:
+        raw = _invoke("TTFUND_MANAGER_INFO", {"manager_name": manager})
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "rows": None, "error": str(e)}
+    data = raw.get("data") or {}
+    profile = data.get("manager_profile") or {}
+    rows = []
+    for f in data.get("managed_funds") or []:
+        rows.append({
+            "code": f.get("FCODE") or "",
+            "name": f.get("SHORTNAME") or "",
+            "appt": (f.get("FEMPDATE") or "")[:10],
+            "company": profile.get("company") or "",
+            "aum": _num(f.get("ENDNAV")),
+        })
+    if not rows:
+        return {"ok": False, "rows": None, "error": f"ttskill 未返回 {manager} 的在管产品"}
+    out = {"ok": True, "rows": rows, "error": None}
+    cache_set("tenure", key, out)
+    return out
+
+
+def base_profile(code: str) -> dict[str, Any]:
+    """基金档案（ttskill BASE_INFOS）：成立日 / 业绩基准 / 现任经理 / 类型 / 规模。
+
+    相对 Wind get_fund_info 的缺口：**没有历任基金经理任职时间**（只有现任姓名），
+    降级路径下「任职日」只能由 --since 显式给出、或退回成立日。这个缺口由
+    cmd_tenure 在提示里说明，不假装有数据。
+    """
+    from _common import CACHE_TTL_FUNDAMENTAL, cache_get, cache_set
+
+    key = f"base|{code}"
+    hit = cache_get("tenure", key, CACHE_TTL_FUNDAMENTAL)
+    if hit is not None:
+        return hit
+    try:
+        raw = _invoke("TTFUND_BASE_INFOS", {"fcode": code, "nav_range": "n"})
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "data": None, "error": str(e)}
+    fpo = (((raw.get("expansion") or {}).get("comprehensive_info") or {})
+           .get("fund_profile_overview") or {})
+    if not fpo:
+        return {"ok": False, "data": None, "error": "ttskill 未返回基金档案"}
+    data = {
+        "full_name": fpo.get("FULLNAME") or fpo.get("SHORTNAME") or "",
+        "short_name": fpo.get("SHORTNAME") or "",
+        "inception": fpo.get("ESTABDATE") or "",
+        "benchmark": fpo.get("BENCH") or "",
+        "managers": fpo.get("JJJL") or "",
+        "fund_type": fpo.get("FTYPE") or "",
+        "aum": _num(fpo.get("ENDNAV")),
+    }
+    out = {"ok": True, "data": data, "error": None}
+    cache_set("tenure", key, out)
+    return out
+
+
+# ═══ 任职期复盘（tenure）净值序列 ═══
+#
+# 定位：**快路径 / 降级路径**，不是精确路径。实测（2026-09-23，001959/022490/019189）：
+#   - range='ln' 一次回全历史（001959 十年 2582 行，0.7s），远快于 Wind 分段（12 次调用 17s）；
+#   - 但**成立后前约 6 周是周频**（022490 前 6 周仅 8 行；019189 前 4 周仅 9 行），
+#     日频从第 7 周起 —— 任职日贴近成立日时，头几周只有周频台阶；
+#   - JZZZL（日增长率）只有 2 位小数，长区间累乘会漂移：001959 任职以来累乘 +95.44%
+#     vs Wind 官方 +95.64%（偏差 0.20pct），2025 单年偏差 3.4pct（周频段丢行所致）。
+# 因此默认精确路径走 sources/wind.py 的分段复权净值；本路径仅在 Wind 不可用或
+# 用户显式要快时启用，并把上面的局限通过 coverage 字段带到产物里，不静默降级。
+
+TTFUND_NAV_WEEKLY_HEAD_DAYS = 42  # 成立后前 6 周：上游给的是周频
+TTFUND_NAV_MIN_HEAD_ROWS = 15     # 6 周内不足 15 行即判定为周频头段
+
+
+def nav_series(code: str, begin: str = "") -> dict[str, Any]:
+    """成立来净值序列 → 合成的复权净值（由官方日增长率累乘）。
+
+    返回 {ok, series:[(日期, 合成复权净值)], coverage:{...}, error}。
+    合成复权净值只用于**区间比值**（累计收益率 = 期末/基期 - 1），绝对值无意义。
+
+    **begin 只做入参过滤，不进缓存键**——这是有意的，且是必须的：
+    上游固定用 `range="ln"` 取成立来全量，`begin` 的切片发生在**取数之后**。
+    旧实现把切片后的结果按 `ttnav|{code}` 落盘，于是
+        nav_series("001959", "2022-01-01")  → 缓存 2022+ 的子集
+        nav_series("001959", "2019-01-01")  → 零网络请求，直接拿 2022+ 的子集
+    第二次调用**静默少给 3 年数据**（ok=True、coverage.first 显示 2022-06），
+    而短序列会让累计收益率与最大回撤**偏小**——一个不报错的错数字。
+    改为：缓存**过滤前**的全量序列，切片每次现做。缓存语义与键重新对齐，
+    这一类「键缺参数」的 bug 就不存在了。
+    """
+    from datetime import date, timedelta
+
+    from _common import CACHE_TTL_FUNDAMENTAL, cache_get, cache_set
+
+    key = f"ttnav|{code}"  # 全量序列的键；begin 是入参过滤器，不是身份的一部分
+    hit = cache_get("tenure", key, CACHE_TTL_FUNDAMENTAL)
+    if hit is not None and hit.get("full_series"):
+        return _window_nav(hit, begin)
+    try:
+        raw = _invoke("TTFUND_NAV_INFO", {"fund_id": code, "range": "ln"})
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "series": [], "coverage": None, "error": str(e)}
+    items = (((raw.get("data") or {}).get("nav_history") or {}).get("items")) or []
+    if not items:
+        return {"ok": False, "series": [], "coverage": None, "error": "ttskill 未返回净值序列"}
+    items = sorted(items, key=lambda it: it.get("FSRQ") or "")
+    series: list[tuple[str, float]] = []
+    level = 1.0
+    missing = 0
+    recovered = 0
+    prev_dw = prev_lj = None
+    for i, it in enumerate(items):
+        g = _as_float(it.get("JZZZL"))
+        dw, lj = _as_float(it.get("DWJZ")), _as_float(it.get("LJJZ"))
+        if g is not None:
+            level *= 1.0 + g / 100.0
+        elif i == 0:
+            missing += 1  # 首日无增长率：作为基准点
+        elif dw is not None and lj is not None and prev_dw and prev_lj is not None:
+            # 缺日增长率的日子用「累计净值差分 / 前日单位净值」复原（与官方 JZZZL 同式）：
+            # 实测 2026-09-23，022490 任职以来因此从 +56.90% 回到 +50.44%（Wind 官方 +50.30%）。
+            # 之所以只在缺失日用它：累计净值只有 3 位小数，逐日量化误差（±0.05pct/天）大于
+            # 官方 JZZZL 的 2 位小数（±0.005pct/天），能用官方值就别用推导值。
+            missing += 1
+            level *= 1.0 + (lj - prev_lj) / prev_dw
+            recovered += 1
+        else:
+            missing += 1
+        series.append((it["FSRQ"], level))
+        if dw is not None and lj is not None:
+            prev_dw, prev_lj = dw, lj
+    out = {
+        "ok": True,
+        "full_series": series,
+        "missing": missing,
+        "recovered": recovered,
+        "error": None,
+    }
+    cache_set("tenure", key, out)
+    return _window_nav(out, begin)
+
+
+def _as_float(val: Any) -> Optional[float]:
+    """上游数值字段 → float；非数值哨兵（""/--/N/A/—/None）一律返回 None。
+
+    为什么必须容错：这里的守卫原本是 `g not in ("", "--", None)` 这样的
+    **精确字符串白名单**，而 NAV 上游实际会返回 `"N/A"`、`"—"`、`"null"`
+    等。漏一个就是 `float("N/A")` → ValueError → 整条 tenure 命令 traceback。
+    数值语义上「取不到」和「不是数」是同一件事，统一成 None 让上层走
+    既有的缺失分支，而不是崩在解析层。
+    """
+    if val is None or isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).strip().rstrip("%").replace(",", "")
+    if not s or s in ("-", "--", "—", "N/A", "n/a", "null", "None", "无"):
+        return None
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _window_nav(full: dict[str, Any], begin: str) -> dict[str, Any]:
+    """从缓存的**全量**序列切出 [begin, ∞) 窗口，并重算 coverage。"""
+    from datetime import date, timedelta
+
+    series: list[tuple[str, float]] = list(full.get("full_series") or [])
+    missing = int(full.get("missing") or 0)
+    recovered = int(full.get("recovered") or 0)
+    if begin:
+        series = [it for it in series if it[0] >= begin]
+    head = series[0][0] if series else ""
+    head_rows = 0
+    if head:
+        try:
+            limit = date.fromisoformat(head) + timedelta(days=TTFUND_NAV_WEEKLY_HEAD_DAYS)
+            head_rows = sum(1 for d, _ in series if _parse_day(d) and _parse_day(d) <= limit)
+        except ValueError:
+            head_rows = 0
+    return {
+        "ok": True,
+        "series": series,
+        "coverage": {
+            "rows": len(series), "first": head, "last": series[-1][0] if series else "",
+            "missing_growth_days": missing, "recovered_growth_days": recovered,
+            "weekly_head": head_rows < TTFUND_NAV_MIN_HEAD_ROWS, "head_rows_6w": head_rows,
+        },
+        "error": None,
+    }
+
+
+def _parse_day(d: str):
+    from datetime import date
+
+    try:
+        return date.fromisoformat(d)
+    except (TypeError, ValueError):
+        return None

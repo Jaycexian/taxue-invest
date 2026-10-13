@@ -103,8 +103,13 @@ def resolve_code(keyword: str) -> str:
 
 
 def _looks_like_hk(keyword: str) -> bool:
-    """与 cmd_intent/hithink 共用同一 HK 判定（单一实现）。"""
-    from sources.hithink import looks_like_hk
+    """与 cmd_intent 共用同一 HK 判定（单一实现，见 _common.looks_like_hk）。
+
+    判据住在 _common 而不是 sources.hithink：后者 import 期要拉
+    urllib.request/ssl/concurrent.futures，实测 ~17ms——只为 2 行正则，
+    却让**每条 stock 命令（含纯缓存命中）**都付这笔钱。
+    """
+    from _common import looks_like_hk
 
     t = (keyword or "").strip()
     # 6 位纯数字必属 A 股/基金体系，先短路，避免 resolve_code 前缀误判

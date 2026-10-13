@@ -130,10 +130,13 @@ def json_out(data: Any, *, indent: bool = True) -> str:
 
 
 def strip_paren_suffix(name: str) -> str:
-    """Strip trailing date/unit parentheses: '最新价(元)(2026.05.22)' → '最新价'."""
+    """Strip trailing date/unit suffixes:
+    '最新价(元)(2026.05.22)' → '最新价'；妙想的 '最新价(元)-2026.10.09'
+    （单位在括号、日期挂在破折号后）同样归一到 '最新价'。"""
     import re
 
-    return re.sub(r"\(.*?\)", "", name).strip()
+    name = re.sub(r"\(.*?\)", "", name)
+    return re.sub(r"[-—]\s*\d{4}\.\d{1,2}\.\d{1,2}$", "", name).strip()
 
 
 # ═══ 代码域分类（单一真源） ═══
@@ -176,9 +179,28 @@ def kind_from_code(t: str) -> Optional[str]:
     return None
 
 
+def looks_like_hk(keyword: str) -> bool:
+    """入参是否像港股代码（5 位数字，或带 .HK 后缀）。
+
+    为什么放在这里而不是 sources/hithink.py：判据本身只有两条正则，但它有
+    **两个消费者**（cmd_stock._looks_like_hk 与 cmd_intent），而
+    `sources.hithink` 在 import 期就会拉进 urllib.request → http.client →
+    ssl 与 concurrent.futures。实测每条 `invest-cli stock` 命令（**包括
+    纯缓存命中**）都要为这一个 2 行判断付 ~17ms 的 import，占 50ms 命中
+    路径的三分之一。判据下沉到本模块后，命中路径不再 import 任何适配器。
+    这与 kind_from_code 同处一室：都是「代码域判据」，都该只有一份。
+    """
+    t = (keyword or "").strip()
+    if t.isdigit() and len(t) == 5:
+        return True
+    return t.upper().endswith(".HK")
+
+
 def pick_screen_columns(all_keys: list[str], limit: int = 6) -> list[str]:
     """Pick display columns without hardcoding dated header strings."""
-    priority_stems = ("代码", "名称", "最新价", "涨跌幅", "市盈率", "市净率", "总市值")
+    # 股息率排第 5：股息率筛选（妙想实测榜单整列都是它）连本列都不显示就
+    # 失去了意义；不含该列的筛选结果不受影响——词表只决定挑列优先级。
+    priority_stems = ("代码", "名称", "最新价", "涨跌幅", "股息率", "市盈率", "市净率", "总市值")
     picked: list[str] = []
     for stem in priority_stems:
         for k in all_keys:
@@ -212,6 +234,15 @@ def pick_screen_columns(all_keys: list[str], limit: int = 6) -> list[str]:
 CACHE_TTL_QUOTE = 60.0        # 行情快照：1 分钟（同一轮分析内复用足够）
 CACHE_TTL_FUNDAMENTAL = 3600.0  # 财务/基本面：1 小时（变动远慢于行情）
 CACHE_TTL_MACRO = 1800.0      # 宏观时序：30 分钟（FRED 序列为周度/日度，远慢于此）
+# 市场结构类（公告 / 研报 / 股东 / 披露日历 / 一致预期）：变化以小时/天计，
+# 远慢于行情，但比财务快——取 5 分钟。这条路径此前**完全没有缓存**，而
+# `westock <cmd> <codes>` 实测 375ms/次（上游往返），同一会话里重复问同一只股
+# 每次都要重付一遍。
+CACHE_TTL_MARKET = 300.0
+# westock 长尾透传：里面含盘中量价类命令（flow / chip / quote），所以只给一个
+# 「同轮去重」级窗口——30s 足以吃掉同一会话里的重复调用，又不至于让盘中数据
+# 明显陈旧（专用行情入口 `quote` 自带 10s 口径，要更实时走那条）。
+CACHE_TTL_WESTOCK = 30.0
 # 缓存文件的最长保留时间：TTL 只决定「读时是否算命中」，不负责删文件。
 # 没有这一步，`sec`（单公司 companyfacts 约 3.7MB）会按查询过的公司数无界增长。
 CACHE_MAX_AGE = 7 * 24 * 3600.0  # 7 天
@@ -223,7 +254,7 @@ def cache_root() -> Path:
     """invest-cli 缓存根目录（尊重 XDG/平台惯例，不硬编码个人路径）。"""
     env = os.environ.get("INVEST_CLI_CACHE_DIR", "").strip()
     if env:
-        base = Path(env).expanduser()
+        base = Path(env).expanduser().resolve()
     elif sys.platform == "darwin":
         base = Path.home() / "Library" / "Caches" / "invest-cli"
     else:

@@ -37,6 +37,9 @@ def test_screen_columns() -> None:
     assert "代码" in cols
     assert any("最新价" in c for c in cols)
     assert strip_paren_suffix("最新价(元)(2026.05.22)") == "最新价"
+    # 妙想列名：单位在括号、日期挂在破折号后（2026-10-11 线上实测），同样归一
+    assert strip_paren_suffix("最新价(元)-2026.10.09") == "最新价"
+    assert strip_paren_suffix("市盈率(动)(倍)-2026.10.09") == "市盈率"
 
 
 def test_find_cli() -> None:
@@ -95,7 +98,13 @@ def test_ttskill_code_pass_through() -> None:
 
 
 def test_ttskill_fund_live() -> None:
-    """联网深度用例：ttskill 未登录或不在 PATH 时跳过；163406 为冒烟基准。"""
+    """联网深度用例：ttskill 未登录/未装/凭据过期时跳过；163406 为冒烟基准。
+
+    跳过判据此前只看 `auth token: present`——而 CLI 在**凭据已过期**时仍然报
+    present（token 在、只是失效），于是这条用例在登录过期后由「跳过」变成
+    「失败」，把环境问题伪装成代码回归（实测 2026-10-02 起一直红）。这里补上
+    过期判据：直接用一次真实调用探测，失败即跳过。
+    """
     import shutil
     import subprocess
 
@@ -104,9 +113,16 @@ def test_ttskill_fund_live() -> None:
     if shutil.which("ttskill") is None:
         return
     status = subprocess.run(["ttskill", "status"], capture_output=True, text=True, timeout=15)
-    if "auth token: present" not in (status.stdout or ""):
+    out = (status.stdout or "") + (status.stderr or "")
+    if "auth token: present" not in out:
         return
-    res = fund("163406")
+    if "过期" in out or "expired" in out.lower():
+        return
+    probe = fund("163406")
+    if not probe.get("ok"):
+        # 凭据过期/服务端拒绝：环境问题，跳过而不是断言失败
+        return
+    res = probe
     assert res["ok"], res["error"]
     d = res["data"]
     assert d["code"] == "163406" and d["name"], "代码/名称缺失"

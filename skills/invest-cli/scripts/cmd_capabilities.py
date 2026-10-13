@@ -9,6 +9,7 @@ Agent 遇到未封装场景只能现场翻官方包学调用（低效且易错�
     invest-cli capabilities              数据源总览 + 高层入口速查
     invest-cli capabilities yingmi       盈米 69 工具清单（动态）+ 收敛标注
     invest-cli capabilities ttskill      天天基金 37 包清单（动态）+ 收敛标注
+    invest-cli capabilities westock      westock 已收敛子命令 → cn 高层入口
     invest-cli capabilities <source> --json    JSON 输出（给 skill 层做路由决策）
 
 注意：本命令只列清单与标注，不取业务数据。取数仍走 fund/stock/intent 高层入口
@@ -34,6 +35,16 @@ TTSKILL_CONVERGED: dict[str, str] = {
     "TTFUND_BASE_INFOS": "fund 快照链内嵌（详情+业绩+风险族）",
     "TTFUND_HOLDING_INFO": "fund 快照链内嵌（重仓+行业+资产配置）",
     "TTFUND_GOLD_INFO": "intent deep commodity（黄金）",
+}
+# westock（腾讯微证券）高频子命令 → cn 高层入口（2026-09-24 收敛）。
+# 只登记已收敛的：长尾 40+ 子命令仍走 `invest-cli westock <子命令>` 透传，
+# 清单以 `westock --help` 为准（不在此维护第二份，避免随版本漂移）。
+WESTOCK_CONVERGED: dict[str, str] = {
+    "notice": "cn notice（公告列表；--search 走巨潮 cninfo 检索）",
+    "consensus": "cn consensus（一致预期：目标价 + 年度预测）",
+    "shareholder": "cn holders（股东研究：十大股东 + 变动）",
+    "disclosure": "cn disclosure（财报披露日历）",
+    "report": "cn report（研报列表，可翻页）",
 }
 # 账户/交易域：invest-cli 定位只读数据分析，不为这些建高层入口（透传不新增权限，
 # 但分析链路不消费持仓/下单类数据）。列在此处仅为清单标注。
@@ -134,11 +145,15 @@ def run(source: str, as_json: bool = False) -> int:
         print("    intent deep <fund|stock|bond|commodity> <标的>   意图深取")
         print("    intent screen/portfolio/plan/macro                意图筛选/组合/方案/宏观")
         print("    info <词> / watchlist                             资讯(argo)/自选")
+        print("    cn <子命令> <代码>                                 A股/港股市场结构：notice 公告（--search 巨潮检索）")
+        print("                                                      / consensus 一致预期 / holders 股东 / disclosure 披露日历 / report 研报")
+        print("    sec <代码> [--search 词|--insiders|--events|--holdings]  SEC EDGAR：全文检索/内部人/事件/13F")
+        print("    tenure <基金> [--manager 姓名] [--excel out.xlsx]  任职期复盘（分年度业绩/回撤 + 任职以来 vs 基准）")
         print("    westock <子命令>                                   腾讯微证券长尾能力（筹码/龙虎榜/资金流/")
-        print("                                                      一致预期/ESG/评级/产业链/板块估值）；")
+        print("                                                      ESG/评级/产业链/板块估值）；高频五个已收敛到 cn；")
         print("                                                      `westock --help` 看 40+ 子命令")
         print("    透传（高级/补漏）：wind / yingmi / ttskill — 清单见下方子命令")
-        print("    capabilities yingmi | ttskill                     官方能力清单+收敛标注")
+        print("    capabilities yingmi | ttskill | westock           官方能力清单+收敛标注")
         return 0
 
     if source == "yingmi":
@@ -182,5 +197,17 @@ def run(source: str, as_json: bool = False) -> int:
         print("  参数以官方包 examples/*.example.json 为准。")
         return 0
 
-    print(f"未知 source: {source}（可选: yingmi / ttskill / 空=总览）", file=sys.stderr)
+    if source == "westock":
+        if as_json:
+            print(json.dumps([{"command": k, "status": v} for k, v in WESTOCK_CONVERGED.items()],
+                             ensure_ascii=False, indent=2))
+            return 0
+        print("\n  westock 已收敛到 cn 高层入口（2026-09-24）\n")
+        for cmd, status in WESTOCK_CONVERGED.items():
+            print(f"  westock {cmd:<14} ✅ {status}")
+        print("\n  其余 40+ 子命令仍走透传：invest-cli westock <子命令> [参数]")
+        print("  完整命令树：invest-cli westock --help")
+        return 0
+
+    print(f"未知 source: {source}（可选: yingmi / ttskill / westock / 空=总览）", file=sys.stderr)
     return 1

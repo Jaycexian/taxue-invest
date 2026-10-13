@@ -44,12 +44,14 @@ def test_us_skips_uninstalled_yfinance() -> None:
         assert ids.index("yfinance") < ids.index("bitget")
 
 
-def test_screen_is_eastmoney_only() -> None:
+def test_screen_orders_mxds_before_eastmoney() -> None:
     ids = pick("screen")
     assert "hithink" not in ids
     assert "wind" not in ids
-    if ids:
-        assert ids == ["eastmoney"]
+    # mxds(55) 与 eastmoney(50) 都声明 screen 能力，两者都是「配了才在」；
+    # 都配置时 mxds 必须排在 eastmoney 前（与 us 链 mxds 领跑一致）
+    if "mxds" in ids and "eastmoney" in ids:
+        assert ids.index("mxds") < ids.index("eastmoney")
 
 
 def test_fetch_first_ok_stops() -> None:
@@ -197,7 +199,9 @@ def test_fetch_detects_next_source_when_first_unavailable(monkeypatch) -> None:
     )
     res = route.fetch("stock", "600519", market="a")
     assert res["ok"] is True
-    assert res["source"] == "eastmoney"
+    # 断言「链上第二位」而不是具体某个 sid：registry 增删源（如 mxds 插进
+    # hithink 与 eastmoney 之间）不应碰这个测试的本意——主源不可用要落到下一位
+    assert res["source"] == route.candidates("stock", market="a")[1]
     assert calls["n"] == 2, "第一个源不可用时未探测第二个"
 
 
@@ -216,6 +220,77 @@ def test_fetch_all_unavailable_keeps_original_message(monkeypatch) -> None:
     assert res["error"].startswith("无可用数据源: kind=fund market=-")
     assert "缺 key" in res["error"], "报错没带逐源原因，用户不知道缺什么"
     assert res["tried"], "应给出试过哪些源"
+
+
+# ── 失败信封的落盘负缓存（snapshot_fail）────────────────────────────────
+# 背景：成功结果有快照缓存而失败没有，打错代码（stock zzzz）每次都付完整条
+# 候选链（实测 5.2s）。这里锁三件事：失败落盘、重复查询命中不再跑链、
+# INVEST_CLI_FETCH_FAIL_TTL=0 可整体关闭。
+
+
+def _mount_fake_chain(monkeypatch, tmp_path, fail: bool = True):
+    """把默认路由挂到一条假链上（缓存重定向到 tmp，探测全通过，单源假实现）。"""
+    import sources.route as route
+
+    monkeypatch.setenv("INVEST_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr(route, "candidates", lambda kind, market=None: ["fakesrc"])
+    monkeypatch.setattr(route, "detect", lambda conf: (True, "ok"))
+    calls = []
+
+    def _invoke(sid, kind, arg):
+        calls.append((sid, kind, arg))
+        if fail:
+            return {"source": sid, "kind": kind, "ok": False, "data": None,
+                    "error": "fakesrc: 没有这个标的"}
+        return {"source": sid, "kind": kind, "ok": True, "data": {"price": 1.0},
+                "error": None}
+
+    monkeypatch.setattr(route, "_invoke", _invoke)
+    return calls
+
+
+def test_failure_envelope_is_disk_cached(monkeypatch, tmp_path) -> None:
+    calls = _mount_fake_chain(monkeypatch, tmp_path, fail=True)
+    r1 = fetch("stock", "ZZZZ")
+    assert r1["ok"] is False and len(calls) == 1
+    r2 = fetch("stock", "ZZZZ")
+    assert len(calls) == 1, "失败信封未落盘，第二次查询重跑了整条候选链"
+    assert r2["ok"] is False and r2.get("cached") is True
+    assert r2["error"] == r1["error"], "命中负缓存须原样返回错误信封"
+
+
+def test_fetch_fail_ttl_zero_disables_negative_cache(monkeypatch, tmp_path) -> None:
+    """INVEST_CLI_FETCH_FAIL_TTL=0 须整体关闭负缓存：第二次仍要跑链（排障语义）。"""
+    calls = _mount_fake_chain(monkeypatch, tmp_path, fail=True)
+    monkeypatch.setenv("INVEST_CLI_FETCH_FAIL_TTL", "0")
+    fetch("stock", "ZZZZ")
+    fetch("stock", "ZZZZ")
+    assert len(calls) == 2, "TTL=0 时第二次查询应重新执行候选链，而不是吃到负缓存"
+
+
+def test_failure_cache_expires_after_ttl(monkeypatch, tmp_path) -> None:
+    """负缓存窗口有时限：TTL 内重复查询吃缓存；过期后重新跑链。
+
+    「上游恢复能否被立刻看见」是有意取舍：90s 内恢复不会越过负缓存（与
+    registry 负探测、成功快照缓存同一套有界陈旧语义）；要即时重试走
+    INVEST_CLI_FETCH_FAIL_TTL=0。这里锁的是**窗口必须真的有时限**。
+    """
+    import os as _os
+    import time as _time
+
+    import _common
+
+    calls = _mount_fake_chain(monkeypatch, tmp_path, fail=True)
+    assert fetch("stock", "ZZZZ")["ok"] is False
+    assert fetch("stock", "ZZZZ").get("cached") is True and len(calls) == 1
+    fail_dir = _common.cache_root() / "snapshot_fail"
+    entries = list(fail_dir.glob("*.json"))
+    assert entries, "失败信封没有落盘"
+    old = _time.time() - 91  # 越过默认 90s 窗口
+    for p in entries:
+        _os.utime(p, (old, old))
+    fetch("stock", "ZZZZ")
+    assert len(calls) == 2, "负缓存过期后仍命中——窗口不是有时限的"
 
 
 

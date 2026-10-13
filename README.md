@@ -97,6 +97,9 @@ npx skills add taxueseek/fund-investment-guide
 | 某只基金 | invest-fund | 懂策略吗？能跑赢吗？成本合理吗？ | 主动基金、ETF、QDII |
 | 可转债/黄金原油/REITs/债券 | invest-asset | 债券：偿付+利差+位置；可转债：条款+债底+溢价；商品：逻辑+位置+波动；REITs：底层+运营+估值 | 债市/大宗/国内外REITs |
 | 整体配置 | invest-allocation | 股债比例合理吗？再平衡了吗？ | 跨资产组合 |
+| 选基/基金池 | invest-pool | 风格稳不稳？能力圈在哪？行业轮动值不值得配？ | 基金组合管理 |
+| 风险管理/杠杆/仓位 | invest-risk | 本金安全吗？杠杆安全吗？系统不靠意志力能撑住吗？ | 风险与纪律 |
+| 企业深度/信用 | invest-enterprise | 股东治理+行业+经营+财务+信用+司法 | 单一企业主体 |
 | 市场温度/流动性 | invest-macro | 钱紧不紧？市场过热吗？ | 全球流动性、美股情绪、加密底部 |
 | 出研报/纪要/日报 | invest-analyst | IC 研报、电话会纪要、一致预期、行业深度、市场日报 | 机构级内容产出 |
 | 拿不准？ | invest-discuss | 让多种投资思维同时审视 | 任何标的 |
@@ -142,7 +145,46 @@ npx skills add taxueseek/fund-investment-guide
 
 ---
 
-## v2.7 增量（本版）：热路径去白付 + 腾讯源并入
+## v3.0 增量（本版）：三层架构 + 推理档位
+
+这一版把 invest 系列从「一堆并列的技能」改成**分层架构**，并让「要不要出报告」变成**按需**而不是默认。
+
+### 三层架构：方法论 / 数据 / 呈现分离
+
+| 层 | 职责 | 组件 |
+|:---|:-----|:-----|
+| **方法论层** | 分析框架、决策逻辑 | `invest` / `invest-stock` / `invest-fund` / `invest-asset` / `invest-analyst` / `invest-enterprise` / `invest-allocation` / `invest-pool` / `invest-risk` / `invest-discuss` / `invest-macro` |
+| **数据层** | 取数、清洗、结构化 | `mx-data`（`invest-cli` 的统一封装，不重复造 auth / 路由 / 降级） |
+| **呈现层** | 报告结构与模板 | `mx-templates`（10 个报告模板，`{{变量}}` 占位，不绑定数据源） |
+
+好处是三层各自可替换：方法论不写「怎么取数」，模板不写「数据从哪来」，数据层不写「怎么分析」。
+
+### 推理档位：低 / 中 / 高，默认低档
+
+不是每个问题都要一份报告。「推荐一只短债产品」和「出一份 IC 报告」不该走同一条路。现在分三档：
+
+| 档位 | 取数次数 | 输出 | 触发 |
+|:-----|:--------|:-----|:-----|
+| **低**（默认） | ≤ 2 次 | 终端简洁结论（1-5 行核心指标 + 判断） | 简单查询、推荐、筛选 |
+| **中** | ≤ 4 次 | 要点列表 + 简要分析 | 用户说「详细」「全面」「深入」 |
+| **高** | 不限 | 完整报告（`mx-templates` 渲染） | 用户说「报告」「IC」「深度分析」「研报」 |
+
+公开默认**低档**（快、省、够用）；本机可用 `invest/references/mode.local.yaml` 覆盖为高档，不影响公开默认。
+
+### 新增三个方法论技能
+
+- **invest-pool**：风格分类矩阵（5 风格 × 5 类型）+ 选基七维度评分（35 分制）+ 行业轮动基金评估 + 组合配置原则（15-25 只，底仓/核心/卫星/观察）
+- **invest-risk**：风险四层递进诊断（杠杆→本金→认知→心态）+ 风险管理四层框架（仓位→分散→估值→行为约束）+ 不依赖意志力的系统设计 + 现金管理三层安全垫
+- **invest-enterprise**：企业深度分析（15 板块，股东治理 + 行业 + 经营 + 财务 + 信用 + 司法）
+
+### invest-cli 同步演进（v2.8 → v2.9 + 十月）
+
+- **新增命令**：`tenure`（经理任职期复盘，把分年度业绩/回撤 + 逐日超额从手工 14 分钟变成一条命令）、`report`（基金定期报告 PDF，`--latest 4` 一条命令拿齐四季）、`research fund-rank`（主题基金池 → 批量快照 → 排名 + 重仓×股息率交叉，97 只基金冷缓存 **45.96s**，对照手工串行约 210s，**4.6×**）、`cn` / `fmp` / `fund-class`
+- **新增数据源**：妙想（东方财富，自然语言选股）、fmp、tiingo、etfirst、index_hub；`fund-classification.yaml` 三层分类器
+- **热路径再降**：`stock` 缓存命中 50→**30ms**（命中路径不再 import 任何适配器）、`fund`/`us` 51-52→**40ms**
+- **正确性与守卫**：修「同一件事的第二份实现」类漂移（美股代码前缀吃掉真实 ticker → 答成另一家公司；净值缓存跨窗口投毒）、自选股非原子写致静默丢失、失败信封负缓存（重复失败查询 6285→50ms）；回归 **440 → 513** 测试全绿
+
+## v2.7 增量：热路径去白付 + 腾讯源并入
 
 ### 先量化「日常怎么用」，再动手
 
@@ -444,6 +486,7 @@ skills/
 
 | 版本 | 日期 | 变更内容 |
 |:-----|:-----|:---------|
+| v3.0 | 2026-10 | 三层架构重构（方法论 `invest-*` / 数据 `mx-data` / 呈现 `mx-templates`），消除重复的 auth 与报告模板；新增推理档位（低/中/高，公开默认低档，报告按需）；新增 invest-pool / invest-risk / invest-enterprise 三个方法论技能；invest-cli 同步 v2.8→v2.9 及十月演进（`tenure` / `report` / `research fund-rank` 等新命令，妙想/fmp/tiingo 等新源，热路径再降，回归 440→513） |
 | v2.7 | 2026-09 | 并入腾讯行情（零鉴权）与腾讯微证券 CLI：新增 `quote`（多标的实时行情，三市场 186ms，对照旧路径 7.7s，约 41x）/`kline`/`westock` 三命令；热路径去白付（缓存命中 `fund` 0.09→0.03s、`stock` 0.08→0.05s、`us` 0.05→0.03s）；修 19 项缺陷（代码域冒牌数据/跨源猜测/可用性判据漂移/号码重叠静默串号/限流通告当数据等）；移植时不继承 17 类缺陷；回归 237→317 |
 | v2.6 | 2026-09 | 去外部 CLI 依赖：天天基金/盈米/Wind 三源由 `subprocess → CLI` 改为直连 API（认证沿用官方）；隔离实测 invoke 0.374→0.237s、yingmi 0.458→0.244s、wind 0.591→0.426s；修自然语言持仓/配置路径从未可用、凭据重复读取等；回归 171→192 |
 | v2.5 | 2026-09 | 路由惰性探测（A 股探测段 0.53s→0.012s，`stock` 冷路径 1.52s→0.51s）；去重复利润表请求；修四处判据错层（中文名误判美股/盈米误配基金/空标的打满整链/`screen` 裸异常）；缓存 7 天上限自清（本机 24MB→11MB）；回归 156→171 |
@@ -558,6 +601,9 @@ User Question
 | A specific fund | invest-fund | Understand the strategy? Can beat benchmark? Cost reasonable? | Active funds, ETFs, QDII |
 | Convertible bonds / Gold & Oil / REITs / Bonds | invest-asset | Bonds: solvency+spread+position; Convertibles: terms+floor+premium; Commodities: logic+position+volatility; REITs: assets+operations+valuation | Bond market / Commodities / REITs |
 | Overall allocation | invest-allocation | Stock-bond ratio reasonable? Rebalanced? | Cross-asset portfolio |
+| Fund picking / fund pool | invest-pool | Style stable? Where's the circle of competence? Is sector rotation worth it? | Fund portfolio management |
+| Risk / leverage / position | invest-risk | Is principal safe? Is leverage safe? Does the system hold without willpower? | Risk & discipline |
+| Company deep-dive / credit | invest-enterprise | Governance + industry + operations + financials + credit + legal | A single corporate entity |
 | Market temperature / liquidity | invest-macro | Is money tight? Is the market overheated? | Global liquidity, US sentiment, crypto bottom signals |
 | Research note / minutes / daily | invest-analyst | IC memo, earnings-call minutes, consensus, industry deep-dive, daily report | Institutional-grade output |
 | Not sure? | invest-discuss | Let multiple investment minds examine together | Any target |
@@ -664,6 +710,43 @@ Add `--json` for structured output an agent can parse; omit it for a terminal ta
 
 ## Recent Improvements & Performance
 
+### v3.0: three-layer architecture + inference tiers
+
+This version turns the invest series from "a pile of parallel skills" into a **layered architecture**, and makes "produce a report" **on-demand** instead of the default.
+
+**Three layers — methodology / data / presentation separated**
+
+| Layer | Responsibility | Components |
+|:------|:---------------|:-----------|
+| **Methodology** | Analysis frameworks, decision logic | `invest` / `invest-stock` / `invest-fund` / `invest-asset` / `invest-analyst` / `invest-enterprise` / `invest-allocation` / `invest-pool` / `invest-risk` / `invest-discuss` / `invest-macro` |
+| **Data** | Fetch, clean, structure | `mx-data` (a thin wrapper over `invest-cli`; no duplicate auth / routing / fallback) |
+| **Presentation** | Report structure and templates | `mx-templates` (10 report templates, `{{var}}` placeholders, source-agnostic) |
+
+**Inference tiers: low / medium / high, default low**
+
+Not every question needs a report. "Recommend a short-duration bond fund" and "write an IC report" should not take the same path:
+
+| Tier | Fetches | Output | Trigger |
+|:-----|:--------|:-------|:--------|
+| **low** (default) | ≤ 2 | Terminal conclusion (1-5 lines of key metrics + verdict) | Simple query, recommendation, screening |
+| **medium** | ≤ 4 | Bullet summary + brief analysis | User says "detailed" / "in depth" |
+| **high** | unlimited | Full report (`mx-templates`) | User says "report" / "IC" / "deep analysis" |
+
+The public default is **low** (fast, cheap, sufficient); locally you can override to high via `invest/references/mode.local.yaml` without affecting the public default.
+
+**Three new methodology skills**
+
+- **invest-pool**: style matrix (5 styles × 5 types) + 7-dimension fund-picking score (out of 35) + sector-rotation fund assessment + portfolio construction (15-25 funds; core/satellite/watch)
+- **invest-risk**: four-layer risk diagnosis (leverage → principal → cognition → mindset) + four-layer risk management + a system that doesn't rely on willpower + a three-tier cash safety cushion
+- **invest-enterprise**: company deep-dive (15 sections: governance + industry + operations + financials + credit + legal)
+
+**invest-cli evolution in step (v2.8 → v2.9 + October)**
+
+- **New commands**: `tenure` (manager-tenure review — turns per-year return/drawdown + daily excess from a 14-minute manual job into one command), `report` (fund periodic-report PDFs, `--latest 4` grabs four quarters in one command), `research fund-rank` (theme fund pool → batch snapshot → ranking + holdings × dividend-yield cross; 97 funds cold-cache in **45.96s** vs ~210s manual, **4.6x**), plus `cn` / `fmp` / `fund-class`
+- **New sources**: Miaoxiang (Eastmoney, natural-language screening), fmp, tiingo, etfirst, index_hub; a three-layer fund classifier (`fund-classification.yaml`)
+- **Hot path faster again**: `stock` cache hit 50→**30ms** (no adapter import on the hit path), `fund`/`us` 51-52→**40ms**
+- **Correctness & guards**: fixed "second implementation of the same thing" drift (a US ticker prefix swallowed a real symbol and returned a different company; NAV cache cross-window poisoning), non-atomic watchlist writes silently losing user data, and added a failure-envelope negative cache (repeated failing query 6285→50ms); regression **440 → 513**, all green
+
 ### v2.7: hot-path waste removed + Tencent sources merged
 
 **Measure real usage first.** From 216 real sessions, **80% of consecutive `invest-cli` calls are <60s apart** (inside the 60s snapshot cache TTL). So daily performance = the cache-hit path plus the first fetch per symbol; cold paths are the minority. That killed two planned optimizations (raising the US snapshot TTL would help only 4-5 calls; the 3.5s HK path is 0.3% of calls).
@@ -754,9 +837,14 @@ skills/
 ├── invest-fund/               # Fund analysis (scene routing)
 ├── invest-asset/              # Single-asset: Bonds/Convertibles/Commodities (incl. gold 10D)/REITs
 ├── invest-allocation/         # Asset allocation
+├── invest-pool/               # Fund picking & fund pool (style matrix / 7-dim score / rotation)
+├── invest-risk/               # Risk & discipline (4-layer diagnosis / system design / cash cushion)
+├── invest-enterprise/         # Company deep-dive (15 sections: governance/industry/ops/financials/credit/legal)
 ├── invest-macro/              # Macro & market environment (liquidity/sentiment/bottom signals)
 ├── invest-discuss/            # Masters discussion (multi-perspective validation)
 ├── invest-analyst/            # Institutional-grade output (IC memo/minutes/consensus/daily)
+├── mx-data/                   # Data layer: thin wrapper over invest-cli (scene → command)
+├── mx-templates/              # Presentation layer: 10 report templates ({{var}} placeholders)
 └── invest-cli/                # Data layer: CLI + multi-source adapters + regression tests
     └── docs/                  # Data-source notes + performance & defect reports (with repro steps)
 ```
@@ -767,6 +855,7 @@ skills/
 
 | Version | Date | Changes |
 |:--------|:-----|:--------|
+| v3.0 | 2026-10 | Three-layer refactor (methodology `invest-*` / data `mx-data` / presentation `mx-templates`), removing duplicated auth and report templates; inference tiers (low/medium/high, public default low, report on demand); three new methodology skills invest-pool / invest-risk / invest-enterprise; invest-cli synced through v2.8→v2.9 and October work (new `tenure` / `report` / `research fund-rank` commands; Miaoxiang/fmp/tiingo sources; hot path faster again; guards 440→513) |
 | v2.7 | 2026-09 | Tencent quotes (keyless) and Tencent WeStock CLI merged: new `quote` (multi-symbol real-time, three markets in 186ms vs 7.7s on the old path, ~41x) / `kline` / `westock` commands; hot-path waste removed (cache hit: `fund` 0.09→0.03s, `stock` 0.08→0.05s, `us` 0.05→0.03s); 19 defects fixed (wrong-domain fake data / cross-source guessing / availability-criteria drift / silent symbol overlap / rate-limit notice as data); 17 classes not inherited when porting; guards 237→317 |
 | v2.6 | 2026-09 | External-CLI dependency removed: TTFund / YingMi / Wind moved from `subprocess → CLI` to direct API calls (same official auth); isolated timings invoke 0.374→0.237s, yingmi 0.458→0.244s, wind 0.591→0.426s; fixed the natural-language portfolio/plan path that never worked; guards 171→192 |
 | v2.5 | 2026-09 | Lazy source probing (A-share probe segment 0.53s→0.012s; `stock` cold 1.52s→0.51s); removed a duplicate income-statement request; four wrong-layer fixes (CJK as US ticker / YingMi fund false positive / empty target exhausting the chain / `screen` bare exception); 7-day cache cap with cleanup (24MB→11MB locally); guards 156→171 |

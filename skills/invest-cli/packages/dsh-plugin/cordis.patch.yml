@@ -1,0 +1,21 @@
+# invest-cli-dsh bundle：默认一行 —— 注册**单个** invest 工具。
+#
+# 为什么是单工具而不是 21 个具名工具：工具定义（名称+描述+schema）每轮请求都
+# 注入上下文且压缩清不掉。21 个具名工具 ≈4K token/轮 的常驻开销，而本 CLI 的
+# 调用面是**平摊**的（会话日志实测 top5 是 stock/sec/us/cn/tenure，各占 6-9%），
+# 没有哪条够格做「专属工具」。单入口把常驻开销压到 ≈0.5K/轮，同时保住全能力面。
+#
+# 依赖：Python 3.10+（skill 自带 venv 时 `us` 走 yfinance 全量快照；无 venv 时
+# 回退系统 python3，`us` 降级为腾讯行情/Bitget 报价）。入口解析见 dsh/index.js。
+#
+# 同 id 可在用户层 cordis.patch.yml 覆盖（同 id + name 才是替换）。
+
+- insert:
+    - id: invest-cli
+      name: '@taxueseek/invest-cli-dsh'
+      config:
+        # 单次命令超时；tenure / report 有各自的更长预算（见 dsh/index.js DEFAULTS）
+        timeoutMs: 60000
+        # 单次返回的最大字符数，超出截断并注明（防 `screen --json` 这类
+        # 88KB 载荷把上下文顶爆）
+        maxOutputChars: 24000

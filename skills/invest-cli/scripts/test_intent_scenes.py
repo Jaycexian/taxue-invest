@@ -95,6 +95,33 @@ def test_classify_english_type_words() -> None:
     assert classify("AAPL") == "us"  # 真美股代码不受影响
 
 
+def test_screen_fund_search_carries_pagination_and_keyword() -> None:
+    """SearchFunds 两个静默空结果来源（2026-10-11 实测回归点）必须都兜住。
+
+    ① 旧路由只传 {"keyword": …}，盈米按空页处理，静默返回
+       {"funds": [], "total": 0} 且 rc=0——「没带分页」被读成「没有匹配基金」。
+    ② 值是自然语言短语时（SKILL 承诺的用法），整串原样喂给基金名**子串搜索**
+       同样零命中——「红利主题基金」→ 0 条，「红利」→ 10 条。
+    """
+    from cmd_intent import _fund_search_keyword
+
+    d = _dispatch("screen", "红利主题基金")
+    assert d["route"][0] == "yingmi", f"基金语义应路由盈米: {d}"
+    assert d["route"][1] == "SearchFunds"
+    params = d["route"][2]
+    assert params.get("pageIndex") == 1 and params.get("pageSize"), (
+        f"SearchFunds 缺分页参数——盈米会静默回空页: {params}"
+    )
+    # 短语要提炼成名字关键词：剥通用修饰词，不做语义猜测
+    assert params["keyword"] == "红利", f"应提炼出「红利」: {params}"
+    # 名字里真含这些字的查询不受影响（剥完为空则原样返回）
+    assert _fund_search_keyword("红利主题基金") == "红利"
+    assert _fund_search_keyword("医药基金") == "医药"
+    assert _fund_search_keyword("基金") == "基金"
+    # 「混合/优选/精选」是真名用词，不在剥离词表里
+    assert _fund_search_keyword("华商红利优选混合") == "华商红利优选混合"
+
+
 if __name__ == "__main__":
     test_scene_routes_are_callable()
     test_dispatch_scene_shapes()
@@ -102,4 +129,5 @@ if __name__ == "__main__":
     test_deep_bond_keeps_target()
     test_deep_commodity_routes_ttskill_gold()
     test_classify_english_type_words()
+    test_screen_fund_search_carries_pagination()
     print("test_intent_scenes: OK")

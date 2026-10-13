@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ._http import guarded_open
+
 API_BASE = "https://fuyao.aicubes.cn"
 DEFAULT_TIMEOUT = 15
 USER_AGENT = "invest-cli/hithink"
@@ -153,10 +155,14 @@ def detect() -> tuple[bool, str]:
 
 
 def looks_like_hk(keyword: str) -> bool:
-    t = (keyword or "").strip()
-    if t.isdigit() and len(t) == 5:
-        return True
-    return t.upper().endswith(".HK")
+    """HK 判据已下沉到 _common（见那里的说明：本模块 import 太贵）。
+
+    这里保留同名转发，避免任何仍按旧路径 import 的调用方断掉；
+    判据本身只有一份实现，不构成第二套逻辑。
+    """
+    from _common import looks_like_hk as _impl
+
+    return _impl(keyword)
 
 
 def _to_float(v: Any) -> Optional[float]:
@@ -240,7 +246,7 @@ def _envelope(kind: str, ok: bool, data: Any = None, error: Optional[str] = None
 def _default_http_get(url: str, headers: Optional[dict[str, str]] = None) -> tuple[int, str]:
     req = urllib.request.Request(url, headers=headers or {})
     try:
-        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+        with guarded_open(req, DEFAULT_TIMEOUT, allowed_host="fuyao.aicubes.cn") as resp:
             return resp.getcode() or 200, resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace") if e.fp else ""

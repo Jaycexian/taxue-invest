@@ -366,6 +366,65 @@ def test_screen_genuine_zero_results_stays_success(monkeypatch) -> None:
     assert "未找到结果" in out
 
 
+# ── 8b. 妙想（mxds）胜出时 screen 不得崩溃
+#
+# 实测（2026-10-11）：妙想 priority 55 高于东财 50，凭据在时 `invest-cli screen`
+# 恒走妙想；其结果体 result["data"] 直接是 columns+items 表列表，旧解包对 list
+# 再 .get("data") 抛 AttributeError，整条命令一次都没跑通过。修复后的解包对
+# dict 连剥两层 .data（东财），list 原样进列表分支（妙想）——两种胜出源
+# 共用一套解析层，谁的形态都不能崩。
+
+
+def _mxds_screen_payload() -> dict:
+    """妙想 mx_stocks_screener 的真实信封形状（2026-10-11 线上实测）。"""
+    return {"data": [{
+        "columns": ["序号", "代码", "名称", "最新价(元)-2026.10.09", "涨跌幅(%)-2026.10.09",
+                    "证券类型", "年度股息率(%)-2025.12.31", "涨跌额(元)-2026.10.09",
+                    "换手率(%)-2026.10.09", "量比-2026.10.09", "成交量(股)-2026.10.09",
+                    "成交额(元)-2026.10.09", "市盈率(动)(倍)-2026.10.09", "市净率(倍)-2026.10.09",
+                    "总市值(元)-2026.10.09", "流通市值(元)-2026.10.09"],
+        "items": [
+            ["1", "600519", "贵州茅台", "1680.00", "1.23", "A股", "3.56", "-0.09",
+             "0.5", "1.1", "746.81万", "1.01亿", "28.50", "8.10", "21096.00亿", "21096.00亿"],
+            ["2", "000651", "格力电器", "38.83", "-0.50", "A股", "7.46", "0.15",
+             "2.4", "1.8", "727.19万", "5459.43万", "8.19", "1.58", "2175.03亿", "2175.03亿"],
+        ],
+    }]}
+
+
+def test_screen_mxds_table_list_renders(monkeypatch, capsys) -> None:
+    import cmd_screen
+
+    monkeypatch.setattr("sources.route.fetch", lambda kind, arg, **kw: {
+        "source": "mxds", "kind": "mx_stocks_screener", "ok": True,
+        "data": _mxds_screen_payload(), "error": None})
+
+    assert cmd_screen.run("股息率最高的50只A股") == 0, "妙想结果体被解包崩掉"
+    out = capsys.readouterr().out
+    assert "找到 2 只" in out
+    assert "600519" in out and "贵州茅台" in out
+    # 挑列与东财分支同口径：股息率/市盈率要占住前 6 列，序号/证券类型不占位
+    assert "股息率" in out and "市盈率" in out
+    assert "序号" not in out and "证券类型" not in out
+    # 表头剥掉单位括号与日期尾巴（妙想格式挂在破折号后）
+    assert "最新价(元)-2026.10.09" not in out
+
+
+def test_screen_mxds_json_envelope_passthrough(monkeypatch, capsys) -> None:
+    """--json 是 agent 消费路径：妙想结果体必须原样透传、rc=0。"""
+    import json as _json
+
+    import cmd_screen
+
+    monkeypatch.setattr("sources.route.fetch", lambda kind, arg, **kw: {
+        "source": "mxds", "kind": "mx_stocks_screener", "ok": True,
+        "data": _mxds_screen_payload(), "error": None})
+
+    assert cmd_screen.run("x", as_json=True) == 0
+    parsed = _json.loads(capsys.readouterr().out)
+    assert parsed["data"][0]["items"][0][1] == "600519"
+
+
 # ── 9. 参数被无声吞掉：sec --filings 非正数必须报错
 #
 # `sec_edgar.filings` 内部用 `max(1, limit)` 兜底，于是 `--filings 0` 与
@@ -384,18 +443,22 @@ def test_sec_rejects_non_positive_filings(monkeypatch, capsys) -> None:
 
 
 def test_sec_accepts_positive_filings(monkeypatch) -> None:
-    """反向用例：正常参数不能被这条守卫误拦。"""
+    """反向用例：正常参数不能被这条守卫误拦（并透传新增的序列参数）。"""
     import cmd_sec
 
     seen = {}
 
-    def _fake_snapshot(ticker, forms=None, limit=5):
+    def _fake_snapshot(ticker, forms=None, limit=5, years=5, quarterly=False):
         seen["limit"] = limit
+        seen["years"] = years
+        seen["quarterly"] = quarterly
         return {"ok": True, "data": {"ticker": ticker, "metrics": {}, "filings": []}}
 
     monkeypatch.setattr(cmd_sec.sec_edgar, "snapshot", _fake_snapshot)
     assert cmd_sec.run("AAPL", limit=3, as_json=True) == 0
     assert seen["limit"] == 3
+    assert cmd_sec.run("AAPL", limit=3, as_json=True, years=8, quarterly=True) == 0
+    assert seen["years"] == 8 and seen["quarterly"] is True
 
 
 # ── 10. watchlist：空代码不得写盘；--json 的退出码必须与信封一致

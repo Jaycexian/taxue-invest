@@ -58,14 +58,51 @@
 | 账户/交易/定投 | ACCOUNT_HOLDING/PROFIT、TRADE_QUERY、CONDITION_ORDER、SIM_TRADE、SUBACCOUNT、RATION_PLAN | **有意不封装** | — | 边界纪律：invest-cli 定位"数据与分析"，交易执行类不做高层入口，仅透传可读 |
 | 主题/策略/创新药/债市/分红温度/事件 | THEME_INFO、STRATEGY_INFO、PORTFOLIO_ANALYSIS、INNOVATIVE_PHARMA、BOND_MARKET、DIVIDEND_TEMPERATURE、EVENT_SELECT、GROUP_BACKTEST、HUOQIBAO_LIST、FAVOR_ZX、PREMIUM_FINANCE、SIMILAR_FUND_SELECT | 无命令可达 | P2 | 透传可用，随用随收 |
 
-## 四、三个系统性根因（为什么"没高效利用现有工具"会重复犯）
+## 四、westock 收敛（2026-09-24）
+
+westock（腾讯微证券）此前整体以「长尾透传」接入（`invest-cli westock <子命令>`）。
+2026-09-24 收敛**高频五个**到 `cn` 高层入口，判据是「分析链路会反复消费」而不是「顺手封装」：
+
+| westock 子命令 | cn 入口 | 收敛后新增的价值 |
+|---|---|---|
+| `notice list/detail` | `cn notice`（+`--search` 走 argo/cninfo） | 公告列表结构化 + 全市场公告检索（此前 CN 侧无公告检索能力） |
+| `consensus` | `cn consensus` | 一致预期（目标价 + 年度 EPS/PE 预测）结构化 |
+| `shareholder` | `cn holders` | 十大股东与变动结构化（治理/质押核查） |
+| `disclosure` | `cn disclosure` | 财报披露日历（预约披露日） |
+| `report list` | `cn report` | 研报列表（可翻页） |
+
+**为什么收敛这五个**：invest-stock 三关（治理核查）与 invest-analyst（一致预期/研报）会反复消费；
+其余 40+ 子命令（chip/lhb/events/industry-chain/bond/macro…）保持透传——用到再收敛，
+避免「预支复杂度」（与 ttskill 一节同一纪律）。
+
+**收敛同时修掉的两个缺陷**：
+1. 多代码不归一：`notice list 600519,000858` 这类逗号串过不了形状守卫，服务端按「代码错误」拒绝
+   → 新增 `westock.normalize_codes()` 逐段归一；
+2. `notice list` 的代码位不在 `_CODE_AT` 表里（裸代码不归一）→ 补 `("notice","list"): 2`。
+
+**守护**：`test_cn_cmd.py`（信封契约 + 解析 fail-open + argo 降级路径）、
+`cmd_capabilities.py` 的 `WESTOCK_CONVERGED` 登记（`invest-cli capabilities westock` 可见）。
+
+## 五、三个系统性根因（为什么"没高效利用现有工具"会重复犯）
 
 1. **ttskill 无透传子命令**：invest-cli 命令面只有 wind/yingmi 两个透传，ttskill 37 包里除基金三合一与黄金外全部"声明不可达"→ Agent 只能现场翻官方包学 CLI 调用（低效、易错）。本次补 `invest-cli ttskill <skill_id>`。
 2. **盈米适配器只认 `{` 开头**：批量/列表/搜索类工具（GetPopularFund、Batch*、Search*）返回 JSON 数组 → 一律被误判"未返回结构化数据"。本次修复。
 3. **无能力发现层**：106 个官方能力点无一处集中登记"有什么、参数怎么传、invest-cli 收敛到哪"→ 靠记忆必然遗忘。本次补 `invest-cli capabilities`（动态列官方清单 + 标注收敛状态）。
 
-## 五、消融/回归纪律（改完逐项验证，删不掉价值就不加）
+## 六、消融/回归纪律（改完逐项验证，删不掉价值就不加）
 
 - 每个"高层入口收敛"都要有对应测试：验证路由参数、失败回退（整单不混字段）、来源标注。
 - 透传命令是"面"的补齐（37/69 能力可达），不是逐个封装；某个工具用得多再收敛成高层入口并登记到本表。
 - 交易执行类（下单/调仓/账户资金）永远不进 invest-cli 高层入口——那是券商/基金账户职责，CLI 只做只读数据与分析。
+
+## 七、2026-10-11 更新：基金排行/长程研究缺口已关闭
+
+此前登记的能力缺口「按主题筛主动基金并按多期业绩排名」无原生入口（盈米 SearchFunds
+无业绩字段且当时静默空结果、天天 37 包无排行业务、SearchFunds 分页参数不被
+intent 层透传），Agent 只能手工十轮编排（搜索候选 → 逐只快照 → 排名 → 交叉）。
+
+本次由 `invest-cli research fund-rank <主题>` 关闭：池构建（TTFUND_SEARCH 分页，
+名称子串搜索须先提炼关键词）→ 批量快照（复用 fund 同路径同缓存）→ 排名 →
+重仓×股息率交叉 → 双源互证。实测 97 只池 46s（手工串行 ~210s）。
+遗留缺口：指数/ETF 维度的横向对比未进管线（fund-rank 只做基金侧）；--enrich
+的资讯相关性受限于基金名非热词。

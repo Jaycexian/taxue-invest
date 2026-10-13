@@ -44,6 +44,8 @@ A股 hithink 487ms、港股 eastmoney 3.5s、美股 yfinance 冷 4.4s。
 """
 from __future__ import annotations
 
+from ._http import guarded_open
+
 import json
 import re
 import time
@@ -202,9 +204,24 @@ def normalize_code(code: str) -> str:
     if m:
         c = m.group(2).lower() + m.group(1)
     low = c.lower()
-    if low.startswith("us"):
+    # `us` 前缀的歧义仲裁。`USO`/`USB`/`USMV`/`USMOO` 是真实美股代码，
+    # 无条件 `c[:2]` 会把它们削成 1-2 个字符 → 腾讯按短代码解析，于是
+    # `us USO` 答成 Realty Income（实测）。
+    #
+    # 判据（与 route.canonical_arg 同一套，按可判定性排序）：
+    #   1. `us` + 数字        → 前缀（`us600519`），无歧义；
+    #   2. `us` + **≥4 位**字母 → 前缀（`usAAPL`/`UsAAPL`/`USaapl`/`USAAPL`），
+    #      因为真实 ticker 去掉 `US` 后至少还剩 2 位，而主流写法给 3-4 位；
+    #   3. 其余（`USO`/`USB`/`USMOO`…剩余 ≤2 位）→ 整串就是真实 ticker。
+    #
+    # 为什么第 2 条用「剩余长度」而不是大小写：大小写判据会把合法的
+    # `USAAPL` 判成 ticker（实测回归），而长度判据两边都保得住。
+    m_us = re.match(r"^us([0-9A-Za-z]+)$", c, re.I)
+    if m_us and len(m_us.group(1)) >= 4:
+        return "us" + m_us.group(1).upper()
+    if re.match(r"^us\d", c, re.I):
         return "us" + c[2:].upper()
-    if low.startswith(("sh", "sz", "bj", "hk")):
+    if low.startswith(("sh", "sz", "bj", "hk")) and re.match(r"^(sh|sz|bj|hk)\d", low):
         return low
     if c.isdigit():
         if len(c) == 5:
@@ -240,7 +257,9 @@ def _http_get(url: str, encoding: str = "utf-8") -> str:
                 "Referer": "https://gu.qq.com/",
                 "Accept": "*/*",
             })
-            with urllib.request.urlopen(req, timeout=_TIMEOUT) as resp:
+            with guarded_open(req, _TIMEOUT,
+                              allowed_host=("qt.gtimg.cn", "web.ifzq.gtimg.cn",
+                                            "ifzq.gtimg.cn", "proxy.finance.qq.com")) as resp:
                 return resp.read().decode(encoding, "replace")
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             last = e
@@ -337,17 +356,33 @@ _PLACEHOLDER_FIELDS = ("open", "high", "low", "volume", "amount")
 
 
 def is_placeholder(row: dict) -> bool:
-    """接口返回的占位行（无成交数据）：开高低收量与额全 0 而价格大于 0。"""
+    """接口返回的行是否**没有有效行情**。两种形态都要挡：
+
+      · **空行**——上游对不存在的标的会回一整行 0（实测 `us ZZZZ` → price=0、
+        开高低收量与额全 0）。旧判据首行是 `if not price: return False`，
+        恰好把这个形态放行，于是一个不存在的 ticker 拿到了「有效快照」且 rc=0；
+      · **占位行**——有价无量额（停牌等），价格是前收、开高低量与额全 0。
+    """
     price = row.get("price")
-    if not price:
-        return False
+    if not price:  # None / 0 / "" —— 没有有效价格
+        return True
     return all(not row.get(f) for f in _PLACEHOLDER_FIELDS)
 
 
 def _placeholder_reason(row: dict) -> str:
-    return (f"「{row.get('name') or row.get('symbol')}」当前无成交数据：接口返回的是占位行"
-            f"（开/高/低/成交量/成交额全为 0，时间停在开盘前），可能停牌或无行情；"
-            f"最后价格 {row.get('price')} 只是前收，不是今天的成交价")
+    name = row.get("name") or row.get("symbol") or "该标的"
+    if not row.get("price"):
+        base_err = (f"「{name}」没有有效行情：接口返回的是空行（价格与量额全为 0），"
+                    f"通常是代码不存在或已退市")
+    else:
+        base_err = (f"「{name}」当前无成交数据：接口返回的是占位行"
+                    f"（开/高/低/成交量/成交额全为 0，时间停在开盘前），可能停牌或无行情；"
+                    f"最后价格 {row.get('price')} 只是前收，不是今天的成交价")
+    code = str(row.get("code") or row.get("symbol") or "")
+    conflict = _domain_conflict(code, row)
+    if conflict:
+        base_err += f"；{conflict}"
+    return base_err
 
 
 def _alt_market(code: str) -> str:
@@ -370,7 +405,8 @@ def _needs_resolution(raw: str) -> bool:
 
     全大写字母串**不**走解析：`AAPL` 本身就是 ticker，再搜一次纯属多付一次
     往返（实测这一步约 130ms，是 us 兜底路径总耗时的一半），而且解析结果
-    还可能被同名境外标的抢走。小写（`maotai`）与中文才当作自然语言写法。
+    还可能被同名境外标的抢走。小写与中文才当作自然语言写法，**是否采纳**
+    交给 `_hit_is_plausible`（纯拼音验证不了，会被拒）。
     """
     s = str(raw).strip()
     if not s:
@@ -405,7 +441,9 @@ def search(keyword: str, limit: int = 10) -> list[dict]:
         return []
     # 名称→代码的映射几乎不变，落盘 24h：中文名查询因此从「2 次往返」降到 1 次。
     # 走 invest-cli 统一的 _common 缓存，不另起第二套缓存文件。
-    ckey = f"{kw}|{limit}"
+    # 键尾的 a1 是载荷形状版本：本次给命中加了 alias 字段，旧条目（24h 内）
+    # 缺这一列会让可信度判据对别名查询变严，行为不一致，故直接换键。
+    ckey = f"{kw}|{limit}|a1"
     try:
         from _common import cache_get, cache_set
     except Exception:  # pragma: no cover
@@ -429,24 +467,66 @@ def search(keyword: str, limit: int = 10) -> list[dict]:
         out.append({
             "market": market, "code": code, "symbol": f"{market}{pure}",
             "name": name, "type": (item[4] if len(item) > 4 else ""),
+            # 第 4 列是接口给的别名（如 农业银行 → "ABC"），是 `abc` 这类
+            # 缩写查询唯一**可本地验证**的依据，故带出来给可信度判据用。
+            "alias": (str(item[3]) if len(item) > 3 else ""),
         })
     if cache_set:
         cache_set("tencent_search", ckey, out)
     return out
 
 
+_LATIN_TOKEN = re.compile(r"[A-Za-z0-9]+")
+
+
+def _hit_is_plausible(query: str, hit: dict) -> bool:
+    """命中是否与查询有**可本地验证的字面关系**。
+
+    腾讯 smartbox 是模糊检索：全拼、拼音首字母、英文缩写都算命中，因此对**任何**
+    输入它都会回一个「最像的」——实测 `zzzz` → 中证转债（首字母 zzzz 命中）、
+    `foo` → Food Culture Inc（词前缀）、`test` → 变革性科技加速器ETF。
+    没有这道闸，打错的输入会被当成「查到了」，而且 rc=0，人和 agent 都无从分辨。
+
+    判据（任一成立即通过）：
+      · 代码 / 别名精确命中（大小写不敏感）——`ABC` → 农业银行；
+      · 名称含查询——`茅台` → 贵州茅台；
+      · 拉丁查询按**词边界**命中名称——挡住 `foo` 命中 `Food` 这类词前缀。
+
+    纯拼音（`maotai`）在本地无法验证（接口不回拼音），故一律不接受：宁可让用户
+    改用名称或代码，也不静默返回一个可能不相干的标的。
+    """
+    q = str(query or "").strip()
+    if not q:
+        return False
+    ql = q.lower()
+    symbol = str(hit.get("symbol", ""))
+    code = str(hit.get("code", ""))
+    name = str(hit.get("name", ""))
+    bare = re.sub(r"^(sh|sz|bj|hk|us)", "", symbol, flags=re.IGNORECASE)
+    if ql in (symbol.lower(), code.lower(), bare.lower(), str(hit.get("alias", "")).lower()):
+        return True
+    if re.search(r"[\u4e00-\u9fff]", q):
+        return q in name
+    return any(tok.lower() == ql for tok in _LATIN_TOKEN.findall(name))
+
+
 def resolve_name(name: str) -> str:
-    """名称/拼音 → 符号，**境内市场优先**。
+    """名称/拼音 → 符号，**境内市场优先**；没有可信命中返回空串。
 
     同名标的常带境外版本：搜「沪深300」时命中的 usASHR 中文名干脆就是
     「沪深300 ETF-Xtrackers」，而接口给的中文排序不能改，只好在消费端重排。
+
+    先用 `_hit_is_plausible` 滤掉模糊命中的噪音，再按市场偏好挑一个；滤空即
+    「没这个标的」，与通道故障（抛 TencentError）严格分开。
     """
-    hits = search(name, limit=5)
+    hits = [h for h in search(name, limit=5) if _hit_is_plausible(name, h)]
+    if not hits:
+        return ""
     for pref in _MARKET_PREFERENCE:
         for h in hits:
             if str(h.get("symbol", "")).startswith(pref):
                 return str(h["symbol"])
-    return str(hits[0].get("symbol", "")) if hits else ""
+    return str(hits[0].get("symbol", ""))
 
 
 _PERIOD_ALIAS = {"d": "day", "day": "day", "daily": "day", "日": "day", "日线": "day",

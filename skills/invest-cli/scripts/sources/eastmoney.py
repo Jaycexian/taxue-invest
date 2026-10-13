@@ -50,19 +50,13 @@ def credential_files() -> list[Path]:
 
 def load_api_key() -> str:
     """进程环境/launchctl/shell rc 优先（统一识别器），无则读用户级凭据文件。"""
-    from .env import read_env
+    from .env import read_credential_file, read_env
 
     val = read_env(ENV_KEY)
     if val:
         return val
-    for p in credential_files():
-        try:
-            for line in p.read_text(encoding="utf-8").splitlines():
-                if line.startswith(f"{ENV_KEY}="):
-                    return line.split("=", 1)[1].strip()
-        except OSError:
-            continue
-    return ""
+    # 凭据文件走共用解析（正确剥引号），不再内联 split(...,1)[1].strip()
+    return read_credential_file(ENV_KEY, credential_files())
 
 
 # 可用性探测统一走 data-sources.yaml（type: env_or_file / EASTMONEY_APIKEY），见 sources/registry.py
@@ -84,6 +78,9 @@ def _wrap(kind: str, snap: Any) -> dict:
 def stock(keyword: str) -> dict:
     from cmd_stock import resolve_code, fetch_stock_data
 
+    if not load_api_key():
+        return {"source": "eastmoney", "kind": "stock", "ok": False, "data": None,
+                "error": "未设置 EASTMONEY_APIKEY（env 或 ~/.config/invest-cli/eastmoney.env）"}
     try:
         snap = fetch_stock_data(resolve_code(keyword))
     except Exception as e:
@@ -94,6 +91,9 @@ def stock(keyword: str) -> dict:
 def fund(keyword: str) -> dict:
     from cmd_fund import resolve_fund_code, fetch_fund_data
 
+    if not load_api_key():
+        return {"source": "eastmoney", "kind": "fund", "ok": False, "data": None,
+                "error": "未设置 EASTMONEY_APIKEY（env 或 ~/.config/invest-cli/eastmoney.env）"}
     try:
         snap = fetch_fund_data(resolve_fund_code(keyword))
     except Exception as e:

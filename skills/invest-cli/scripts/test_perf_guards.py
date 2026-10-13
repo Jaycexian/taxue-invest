@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import time
@@ -75,6 +76,36 @@ def test_http_probe_timeout_is_bounded() -> None:
     assert registry.HTTP_PROBE_TIMEOUT <= 3.0, (
         "探针超时过长会把探测本身变成新瓶颈"
     )
+
+
+def test_http_probe_reaches_request_construction(monkeypatch) -> None:
+    """反回归（2026-10-07 实锤）：_probe_http 必须能走到 Request() 构造。
+
+    只 `import urllib.error` 就用 `urllib.request.Request` 会让探测在发请求前
+    就抛 AttributeError——yfinance 从此被标「端点不可达」，美股主路静默跳过，
+    而所有人都以为只是 Yahoo 连不上。锁法：guarded_open 打桩后必须被调到。
+    """
+    registry._PROBE_CACHE.clear()
+    called = {"n": 0}
+
+    @contextlib.contextmanager
+    def _fake_guarded(req, timeout=0, **kw):
+        called["n"] += 1
+
+        class _Resp:
+            def getcode(self):
+                return 200
+
+        yield _Resp()
+
+    import sources._http as _http
+
+    monkeypatch.setattr(_http, "guarded_open", _fake_guarded)
+    ok, detail = registry._probe_http("https://example.com/probe")
+    assert called["n"] == 1, (
+        f"探测没走到真实请求构造（detail={detail!r}）——检查 urllib 子模块导入"
+    )
+    assert ok is True and detail == "HTTP 200"
 
 
 def test_probe_result_is_cached(monkeypatch) -> None:
@@ -477,16 +508,23 @@ if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
 
 
-def test_adapter_negative_probe_not_persisted(monkeypatch, tmp_path) -> None:
-    """adapter 型探测失败不得落盘（120s 负缓存只属于 http 型）。
+def test_adapter_negative_probe_persisted_with_short_ttl(monkeypatch, tmp_path) -> None:
+    """adapter 型探测失败**要**落盘，但只能用「凭据型」短 TTL。
 
-    adapter 的 False 来自「凭据缺失/过期」，用户补好凭据是秒级恢复；
-    落盘负缓存会让 datasources 排障给出 2 分钟前的旧结论（对抗审查发现）。
+    这条判据在两次实测之间翻转过，两种失效模式都真实发生过，所以这里同时守两端：
+
+    · 一度是「False 一律不落盘」，理由是「补凭据是秒级恢复，负缓存会让
+      datasources 给旧结论」。代价当时没量：CLI 每进程独立，进程内 30s 缓存
+      救不了跨进程，于是**每个新进程都要重跑一次子进程探测**——实测
+      `ttskill status` 145ms、`etfirst --help` 197ms，`fund` 每次调用都付。
+    · 现在是「落盘 + 短 TTL」：同一分钟内的重复调用不再重探，旧结论窗口
+      从 120s 压到 60s。这里断言落盘条目自述的 TTL 是**凭据型短值**而不是
+      http 型的 120s——否则「短窗口」这半边就没人守了。
     """
     import json as _json
-    import os
 
     monkeypatch.setenv("INVEST_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.delenv("INVEST_CLI_PROBE_TTL_FAIL", raising=False)
     registry._PROBE_CACHE.clear()
 
     def _fake_adapter_detect():
@@ -507,7 +545,47 @@ def test_adapter_negative_probe_not_persisted(monkeypatch, tmp_path) -> None:
     ok, detail = registry.detect(conf)
     assert ok is False
     disk = registry._probe_cache_path(registry._probe_cache_key(("adapter", "fakeadapter")))
-    assert disk is None or not disk.is_file(), "adapter 失败被落盘 = 120s 负缓存误伤凭据秒恢复场景"
+    assert disk is not None and disk.is_file(), \
+        "adapter 负结果必须落盘，否则每个新进程都要重跑一次子进程探测"
+    payload = _json.loads(disk.read_text(encoding="utf-8"))
+    assert payload.get("ok") is False
+    assert payload.get("fail_ttl") == registry._PROBE_DISK_TTL_FAIL_CRED
+    assert registry._PROBE_DISK_TTL_FAIL_CRED < registry._PROBE_DISK_TTL_DEFAULT_FAIL
+
+
+def test_negative_probe_ttl_zero_disables_persistence(monkeypatch, tmp_path) -> None:
+    """`INVEST_CLI_PROBE_TTL_FAIL=0` 必须让负条目**立即失效**（排障逃生舱）。
+
+    负结果落盘换来的新鲜度损失必须有一个一键撤销口子：排障时用户刚补好凭据，
+    不该等 60s 才看到 datasources 转绿。读侧取「env 覆盖值」与「条目自述值」
+    的较小者，所以 env=0 对既有条目同样生效，不必手删缓存文件。
+    """
+    monkeypatch.setenv("INVEST_CLI_CACHE_DIR", str(tmp_path))
+    monkeypatch.delenv("INVEST_CLI_PROBE_TTL_FAIL", raising=False)
+    registry._PROBE_CACHE.clear()
+
+    calls = {"n": 0}
+
+    def _probe():
+        calls["n"] += 1
+        return False, "不可用"
+
+    registry._cached(("adapter", "ttlzero"), _probe, fail_ttl=registry._PROBE_DISK_TTL_FAIL_CRED)
+    assert calls["n"] == 1
+    # 同进程内命中进程内缓存，不重探
+    registry._cached(("adapter", "ttlzero"), _probe, fail_ttl=registry._PROBE_DISK_TTL_FAIL_CRED)
+    assert calls["n"] == 1
+
+    # 清进程内缓存 = 新的 CLI 进程；默认 TTL 下负条目仍被采纳
+    registry._PROBE_CACHE.clear()
+    registry._cached(("adapter", "ttlzero"), _probe, fail_ttl=registry._PROBE_DISK_TTL_FAIL_CRED)
+    assert calls["n"] == 1, "默认 TTL 下负条目应命中，不该重探"
+
+    # env=0 → 立即失效并重探
+    monkeypatch.setenv("INVEST_CLI_PROBE_TTL_FAIL", "0")
+    registry._PROBE_CACHE.clear()
+    registry._cached(("adapter", "ttlzero"), _probe, fail_ttl=registry._PROBE_DISK_TTL_FAIL_CRED)
+    assert calls["n"] == 2, "TTL=0 时负条目必须失效并重探"
 
 
 # ── 7. yfinance 的「为一个字段打一次请求」必须被跳过（且跳过是真的，不是死代码）

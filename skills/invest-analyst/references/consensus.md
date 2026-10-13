@@ -29,7 +29,8 @@
 
 | 步骤 | 依赖的 skill |
 |------|-------------|
-| 搜索机构研报/评级 | argo 财经检索（invest-cli info）|
+| A股/港股一致预期（目标价 + 年度预测） | `invest-cli cn consensus <代码>`（westock 收敛入口）|
+| 搜索机构研报/评级 | `invest-cli cn report <代码>`（A股/港股研报列表）；argo 财经检索（invest-cli info）|
 | 市场数据/PE/估值 | invest-cli stock/us（行情与估值快照）|
 | 个股基本面 | invest-stock（需要判断一致预期是否合理时）|
 | 多视角 | invest-discuss（需要挑战共识时）|
@@ -40,7 +41,11 @@
 
 ### Step 0：获取一致预期数据
 
-用 invest-cli（`intent` `wind` `info`） / web_search 获取：
+用 invest-cli 获取（A股/港股优先 `cn consensus`；美股走 `wind` 透传或 `info` 检索）：
+
+- A股/港股：`invest-cli cn consensus <代码>` → 目标价 + 未来 3 年 EPS/营收/净利/PE/PB 预测（westock 口径）
+- 美股：一致预期走 Wind（若配置）或 `invest-cli info "<公司> 目标价"` 检索（需核验）；`invest-cli sec <代码> --events` 看业绩节奏与 8-K 事项
+- 通用补充（web_search / argo 检索）：
 
 - 一致预期 EPS（未来 1-2 年）
 - 一致预期营收（未来 1-2 年）

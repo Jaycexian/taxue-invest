@@ -6,3 +6,5 @@ PyYAML>=6.0
 yfinance>=0.2
 # 天天基金直连 gateway 的 ed25519 签名（官方同一套认证逻辑）
 cryptography>=41.0
+# 可选：`invest-cli tenure --excel` 导出 xlsx 用（缺失时自动落 CSV，不影响取数）
+openpyxl>=3.1

@@ -421,7 +421,10 @@ def test_normalize_code_keeps_us_ticker_case():
 # ── ③ 链路位置（位置错了不报错，只会静默降级） ──────────────────────────────
 
 def test_us_chain_puts_tencent_before_bitget():
-    assert route.candidates("us") == ["yfinance", "tencent", "bitget"]
+    # mxds(55) 配置在时是 us 链首（有 us() 能力即入链）；本测试守的是
+    # 富源与兜底的**相对位次**，registry 增删源不应碰它（全量链序在 test_tiingo_source）
+    chain = route.candidates("us")
+    assert chain.index("yfinance") < chain.index("tencent") < chain.index("bitget")
 
 
 def test_rich_sources_stay_first_for_stock():
@@ -430,8 +433,9 @@ def test_rich_sources_stay_first_for_stock():
     assert a[0] == "hithink"
     assert a.index("tencent") > a.index("hithink")
     hk = route.candidates("stock", market="hk")
-    assert hk[0] == "eastmoney"
-    assert hk.index("tencent") > hk.index("eastmoney")
+    # mxds(55) 在时占港股链首；不变量是富源 eastmoney 压过纯行情的 tencent
+    assert hk[0] in ("mxds", "eastmoney")
+    assert hk.index("eastmoney") < hk.index("tencent")
 
 
 def test_tencent_not_in_fund_or_screen_chain():

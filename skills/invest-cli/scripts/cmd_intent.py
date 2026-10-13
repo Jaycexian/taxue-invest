@@ -31,13 +31,20 @@ ROUTES: dict[str, dict] = {
         "commodity": lambda p: ("ttskill_scene", "TTFUND_GOLD_INFO", {"query_scope": "gold"}),
     },
     "screen": {
-        "fund": lambda p: ("yingmi", "SearchFunds", {"keyword": p}),
+        # SearchFunds 两个实测坑（2026-10-11），路由层一并兜住：
+        # ① 分页参数必须显式给——只传 keyword 时上游按空页处理，静默返回
+        #    {"funds": [], "total": 0} 且 rc=0，「没带分页」被读成「没有匹配基金」。
+        # ② 值是自然语言短语时先提炼名字关键词（见 _fund_search_keyword）——
+        #    整串短语原样喂给子串搜索同样零命中。JSON 入参仍可整体覆盖。
+        "fund": lambda p: ("yingmi", "SearchFunds",
+                           {"keyword": _fund_search_keyword(p), "pageIndex": 1, "pageSize": 50}),
         "stock": lambda p: ("eastmoney_screen", p, None),
     },
     "macro": {},
     "portfolio": {"default": lambda p: ("yingmi", "DiagnoseFundPortfolio", _portfolio_params(p))},
     "plan": {"default": lambda p: ("yingmi", "GetAssetAllocationPlan", _plan_params(p))},
     "present": {"default": lambda p: ("present_html", p, None)},
+    "mxds": {"default": lambda p: ("mxds_auto", p, None)},
 }
 
 # 代码域分类的唯一真源在 _common（cmd_stock / cmd_fund 也用同一判据拦
@@ -112,6 +119,22 @@ def classify(target: str) -> str:
 
 def _looks_like_fund_screen(value: str) -> bool:
     return any(k in (value or "") for k in ("基金", "ETF", "债基", "LOF", "FOF", "QDII", "基金经理"))
+
+
+# SearchFunds 是**基金名子串搜索**，不是语义检索：把自然语言短语原样喂进去
+# 大概率零命中（实测 2026-10-11「红利主题基金」→ 0 条，「红利」→ 10 条）。
+# 提炼规则只剥一小撮**通用修饰词**（确定性的词表，不做语义猜测）；剥完为空
+# 则原样返回。注意不能把「混合/优选/精选」这类真名用词放进来。
+_FUND_SEARCH_STOPWORDS = ("主题基金", "基金", "主题", "概念", "相关", "的")
+
+
+def _fund_search_keyword(value: str) -> str:
+    """自然语言基金条件 → SearchFunds 可命中的名字关键词。"""
+    kw = (value or "").strip()
+    for w in _FUND_SEARCH_STOPWORDS:
+        kw = kw.replace(w, "")
+    kw = kw.strip()
+    return kw or (value or "").strip()
 
 
 def _resolve_fund_code(target: str) -> str:
@@ -214,7 +237,7 @@ def _dispatch(scene: str, value: str) -> dict:
             return {"error": f"deep 不支持类型 {typ}"}
         return {"scene": "deep", "type": typ, "route": route(target)}
     if scene == "screen":
-        # 默认东财选股（与 invest-cli screen / SKILL 一致）；明确基金语义才走盈米。
+        # 默认走 route 选股（妙想优先、东财兜底——与 invest-cli screen 同链）；明确基金语义才走盈米。
         key = "fund" if _looks_like_fund_screen(value) else "stock"
         return {"scene": "screen", "route": ROUTES["screen"][key](value)}
     if scene in ("portfolio", "plan", "present"):
@@ -222,6 +245,8 @@ def _dispatch(scene: str, value: str) -> dict:
     if scene == "macro":
         q = value or "中国 宏观经济 数据 指标"
         return {"scene": "macro", "route": ("macro_pipeline", q, None)}
+    if scene == "mxds":
+        return {"scene": "mxds", "route": ROUTES["mxds"]["default"](value)}
     return {"error": f"未知场景 {scene}"}
 
 def _stock_with_fallback(target: str) -> dict:
@@ -311,6 +336,9 @@ def run(scene: str, value: str, as_json: bool = False) -> int:
         res = tts_scene(route[1], route[2] or {})
     elif kind == "argo":
         res = argo_src.search(route[2], engine=route[1])
+    elif kind == "mxds_auto":
+        from sources import mxds as mxds_src
+        res = mxds_src.auto(route[1])
     elif kind == "macro_pipeline":
         # 宏观流动性：FRED 净流动性结构化通道优先（WALCL/TGA/ON RRP + SOFR），
         # 无 key 或失败时降级为 argo 检索兜底，不阻塞宏观查询。

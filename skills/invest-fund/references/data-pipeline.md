@@ -65,6 +65,56 @@ hithink（同花顺，自带主路，费用明细全）→ ttskill（官方可�
 | 主表字段空（如 MGRNAME） | 换备用路径（`fund_profile_overview.JJJL`、`manager_information`），再缺标「未披露」 |
 | 货币基金 DWJZ | 万份收益口径，勿当净值解读 |
 
+## ETF 深度分析模块（etf_analytics.py）
+
+> 入口：`invest-cli fund <代码> --analytics`。纯标准库实现，零第三方依赖。
+
+### 数据源
+
+| 源 | 获取方式 | 提供字段 | 失败行为 |
+|---|---------|---------|---------|
+| invest-cli fund | `fetch_fund_with_fallback()` | 净值、业绩、持仓、费率、经理 | 主源，必须成功 |
+| invest-cli kline | `cmd_kline.run()` | 收盘价序列（回撤分析） | 跳过回撤分析 |
+| ttskill 深取 | `_ttskill_deep()` | 夏普、波动、同类分位 | 跳过缺失字段 |
+| Index Hub API | `sources/index_hub.py` | 估值(PE/PB/PS)、资金流、跟踪误差、换手率 | 跳过估值/资金流分析 |
+
+### 字段映射
+
+| 分析模块 | 输入字段（fund JSON） | 输出字段 |
+|---------|----------------------|---------|
+| 持仓穿透 | `holdings[].hold_ratio` / `holdings[].占净值比例` | `concentration.top1/5/10_pct`, `hhi` |
+| 风险增强 | `risk.sharpe_1y` / `data.夏普比率` / kline 回撤 | `sharpe`, `sortino_ratio`, `downside_deviation`, `calmar_ratio` |
+| 回撤深度 | kline 的 `close`/`收` 序列 | `max_drawdown_pct`, `recovery_days`, `current_drawdown_pct` |
+| 相关性 | 多标的 kline 收盘价 | `correlation_matrix`, `avg_correlation` |
+| 估值分析 | Index Hub `PETtm`/`PETtm5Y`/`PBLf`/`PBLf5Y` | `pe_ttm`, `pe_percentile_5y`, `valuation_signal` |
+| 资金流分析 | Index Hub `etf/etf-scale` 的 `netInflow` 序列 | `total_net_inflow`, `flow_trend`, `recent_1w/1m_inflow` |
+| ETFirst 估值 | ETFirst `getMarketIndicatorData` 的 `pe`/`pePercent`/`pb`/`pbPercent` | `valuation.pe`, `valuation.pe_percent` |
+| ETFirst 风险收益 | ETFirst `getRiskReturnCharacter` 的 `sharpeRatio`/`standardDeviation`/`maximumBack` | `risk_return.sharpe`, `risk_return.volatility` |
+| ETFirst 行业分布 | ETFirst `getIndustryDistribution` 的 `firstWeightList` | `industry_distribution[].industry`, `industry_distribution[].weight_pct` |
+| 排名动态 | `data.近1年同类分位` / `data.近3年同类分位` | `current_percentile`, `trend`, `best/worst_percentile` |
+
+### 判定阈值
+
+| 指标 | 优 | 中 | 需关注 |
+|------|----|----|--------|
+| Top1 集中度 | <10% | 10-20% | >20% |
+| Top5 集中度 | <30% | 30-50% | >50% |
+| Top10 集中度 | <50% | 50-70% | >70% |
+| HHI | <1000 | 1000-1800 | >1800 |
+| 信息比率 | >0.5 | 0-0.5 | <0 |
+| 索提诺比率 | >2 | 1-2 | <1 |
+| 下行波动率 | <15% | 15-25% | >25% |
+| 最大回撤 | <20% | 20-30% | >30% |
+| 恢复天数 | <90 天 | 90-180 天 | >180 天 |
+| 同类分位 | 前 25% | 25-50% | 后 50% |
+| 平均相关系数 | <0.3 | 0.3-0.6 | >0.8 |
+
+### 数据缺失处理
+
+- hithink 源的 `risk` 数据可能全为 null → 风险增强模块返回"数据不足"，属正常行为
+- ttskill 深取会补充风险字段（夏普/波动/回撤），有数据时自动计算
+- K 线获取失败时回撤分析跳过，不影响其他模块
+
 ## 同步义务
 
 本文件口径表与 `invest-cli/scripts/sources/ttskill.py` 的映射逻辑互为镜像：改字段映射必须同步改本文件，反之亦然。ttskill 官方技能包升级后（`ttskill status` 看版本），抽查 163406 验证口径无漂移。

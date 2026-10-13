@@ -15,7 +15,10 @@
 | **腾讯微证券 CLI**（可选） | 安装 westock 二进制 | `invest-cli westock` 长尾能力：筹码/龙虎榜/北向/两融/一致预期/ESG/机构评级/产业链/板块估值/转债条款等 40+ 子命令 | 跳过该源 |
 | **同花顺金融数据服务** | 环境变量 `HITHINK_FINANCE_API_KEY` | `invest-cli stock` / `fund` 的 A 股与公募主路 | 回退东财 |
 | **东方财富** | 环境变量 `EASTMONEY_APIKEY` | A股/港股快照、基金快照、自然语言选股（港股必经） | 该源跳过 |
+| **妙想（东方财富）**（可选） | 环境变量 `EM_API_KEY` 或凭据文件 | `invest-cli screen` 自然语言选股、`intent deep bond` 债券场景 | 回退东财 |
 | **Yahoo（yfinance）** | 安装 Python 包 `yfinance` | `invest-cli us` 美股快照 | 回退腾讯行情，再退 Bitget rToken 报价（仅行情） |
+| **Financial Modeling Prep**（可选） | 环境变量 `FMP_API_KEY` 或 `~/.config/invest-cli/fmp.env` | `invest-cli fmp <代码>` 美股基本面/一致预期/评级/分红（免费档 250 次/天） | 跳过该源 |
+| **Tiingo**（可选） | 环境变量 `TIINGO_API_KEY` 或 `~/.config/invest-cli/tiingo.env` | `invest-cli us <代码> --history` 美股 EOD 历史 | 跳过该源 |
 | **SEC EDGAR** | 免费无 Key（可选 `SEC_EDGAR_USER_AGENT` 声明身份） | `invest-cli sec` 美股财报原文（10-K XBRL + 申报清单） | 始终可用 |
 | **FRED** | 可选 `FRED_API_KEY` | `invest-cli intent macro` 净流动性三序列（免 Key 走 CSV 回退） | 仍可用（CSV 通道） |
 | **argo**（可选） | 安装 [argo](https://github.com/taxueseek/argo) | `invest-cli info` 资讯/舆情、宏观检索兜底 | 跳过该源 |
@@ -147,13 +150,16 @@ python3 <argo>/scripts/search.py --list-engines          # 全部引擎
 python3 <argo>/scripts/search.py --list-engines --detail # 含 key / 熔断 / 可路由状态
 ```
 
-## 7. 其他可选外部源（Wind / 盈米 / 官方 ttskill）
+## 7. 其他可选外部源（妙想 / FMP / Tiingo / Wind / 盈米 / 官方 ttskill）
 
+- **妙想（东方财富）**：自然语言选股与债券场景；配好 `EM_API_KEY`（环境变量或凭据文件）后，`invest-cli screen "<自然语言条件>"` 与 `intent deep bond <代码>` 可直接用。妙想是「自然语言 → 表格」服务，适合不确定入口（选股/债券），确定性快照仍走结构化源。
+- **Financial Modeling Prep（fmp）**：美股基本面专项，`invest-cli fmp <代码>` 直取一致预期 / 评级 / 分红（不经快照链）；免费档 250 次/天。
+- **Tiingo**：美股 EOD 历史专项，`invest-cli us <代码> --history` 走此路。
 - **Wind**：机构级数据，直连 Wind MCP（JSON-RPC over HTTP，不依赖 wind-mcp-skill 的 node CLI）；配好 `WIND_API_KEY` 或 `~/.wind-aifinmarket/config` 后 `invest-cli wind <server_type> <tool> --input '<json>'` 透传。
 - **盈米且慢**：基金诊断、组合诊断、配置方案；配好 apiKey（`~/.yingmi-skill-cli/config.json`）后走 `invest-cli intent deep fund <代码>` / `intent portfolio` / `intent plan`。
 - **官方 ttskill（天天基金）**：`fund` 快照的深取补充（同类分位 / 机构占比 / 经理在管）；登录就绪才补充，未登录自动跳过。37 个官方业务包清单见 `invest-cli capabilities ttskill`。
 
-这三者都是**可选增强**：不可用时整条链自动跳过，不影响其他能力。三者均已改为**直连官方 API**，不再依赖外部 CLI 子进程。
+这些源都是**可选增强**：不可用时整条链自动跳过，不影响其他能力；结构化源均已改为**直连官方 API**，不再依赖外部 CLI 子进程。
 
 ---
 
@@ -175,6 +181,9 @@ python3 <argo>/scripts/search.py --list-engines --detail # 含 key / 熔断 / �
 | 港股 | `invest-cli stock 00700`（东财）→ invest-stock |
 | 基金快照 | `invest-cli fund 110011` → invest-fund |
 | 基金诊断 / 组合 | `invest-cli intent deep fund <代码>` → invest-fund |
+| 基金定期报告 | `invest-cli report 110011 --latest 4` → invest-analyst 速读 |
+| 经理任职期复盘 | `invest-cli tenure --manager <姓名> --company <公司>` |
+| 主题基金排行 | `invest-cli research fund-rank <主题>` |
 | 美股 | `invest-cli us AAPL` → invest-stock 四维评分 |
 | 美股财报原文核验 | `invest-cli sec AAPL` 与 Wind / yfinance 交叉验证 |
 | 市场温度 / 流动性 | `invest-cli intent macro` → invest-macro |
@@ -205,4 +214,4 @@ python3 <argo>/scripts/search.py --list-engines --detail # 含 key / 熔断 / �
 
 ---
 
-*docs/data-sources.md · fund-investment-guide v2.7*
+*docs/data-sources.md · fund-investment-guide v3.0*

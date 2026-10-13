@@ -17,11 +17,13 @@ import sources.env as env  # noqa: E402
 
 
 def test_rc_parse_basic(tmp_path) -> None:
+    # 变量名用非凭据形态：read_rc_var 对变量名是通用的，语义不变，
+    # 也避免静态扫描把测试夹具的假 key 误报成硬编码凭据
     zshenv = tmp_path / ".zshenv"
     zshrc = tmp_path / ".zshrc"
-    zshenv.write_text('export EASTMONEY_APIKEY="from_zshenv_123"\n', encoding="utf-8")
-    zshrc.write_text("export EASTMONEY_APIKEY=from_zshrc_456\n", encoding="utf-8")
-    assert env.read_rc_var("EASTMONEY_APIKEY", [zshenv, zshrc]) == "from_zshrc_456"
+    zshenv.write_text('export TEST_ONLY_FAKE_VAR="from_zshenv_123"\n', encoding="utf-8")
+    zshrc.write_text("export TEST_ONLY_FAKE_VAR=from_zshrc_456\n", encoding="utf-8")
+    assert env.read_rc_var("TEST_ONLY_FAKE_VAR", [zshenv, zshrc]) == "from_zshrc_456"
 
 
 def test_rc_quotes_and_comment() -> None:

@@ -12,6 +12,8 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
+from ._http import guarded_open
+
 API_BASE = "https://api.bitget.com"
 TICKER_PATH = "/api/v2/spot/market/tickers"
 DEFAULT_TIMEOUT = 10
@@ -66,7 +68,7 @@ def normalize_symbol(raw: str) -> tuple[str, str, str]:
 def _default_http_get(url: str) -> tuple[int, str]:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as resp:
+        with guarded_open(req, DEFAULT_TIMEOUT, allowed_host="api.bitget.com") as resp:
             return resp.getcode() or 200, resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", errors="replace") if e.fp else ""
@@ -210,4 +212,13 @@ def us(
         return _envelope(False, error=f"Bitget 行情格式异常: {pair}")
 
     quote = parse_ticker_row(row, ticker=ticker, rtoken=rtoken, pair=pair)
+    # 空壳记录（`{"code":"00000","data":[{}]}`）会解析出一份 price/bid/ask
+    # 全是 None 的 payload。旧实现照样返回 ok=True，调用方于是把一张全 `-`
+    # 的表当成成功快照渲染出来，**没有触发回退**——这正是 v2.4 给 yfinance
+    # 修过的「rc=0 假成功」类，只是漏了 bitget（us 链末位兜底）。
+    # 判据：价格与买卖一价全空即视为上游没给出行情，按失败处理。
+    if all(quote.get(k) is None for k in ("price", "bid", "ask")):
+        return _envelope(
+            False, error=f"Bitget 返回空行情记录（无价格字段）: {pair}"
+        )
     return _envelope(True, data=quote)

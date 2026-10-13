@@ -10,6 +10,7 @@
 # 实测 `import cmd_fund` 直接失败，`invest-cli fund ...` 整条命令不可用。
 from __future__ import annotations
 
+import os
 import sys
 import json
 import warnings
@@ -160,8 +161,14 @@ def fetch_fund_with_fallback(keyword: str) -> dict:
         f_snap = pool.submit(lambda: unwrap_snapshot(fetch("fund", keyword)))
         f_deep = pool.submit(_ttskill_deep, keyword)
         snap = f_snap.result()
+        # 深取是增强型补充字段，不能阻塞主快照交付。
+        # 默认等待最多 2.5s（环境变量 INVEST_CLI_FUND_DEEP_TIMEOUT 可覆写），超时优雅降级放弃深取，避免被上游网络慢拖死
         try:
-            deep = f_deep.result()
+            deep_timeout = float(os.environ.get("INVEST_CLI_FUND_DEEP_TIMEOUT", "2.5"))
+        except (ValueError, TypeError):
+            deep_timeout = 2.5
+        try:
+            deep = f_deep.result(timeout=deep_timeout)
         except Exception:
             deep = None
     if not deep or snap.get("source") == "ttskill":
@@ -370,6 +377,8 @@ def main():
     parser = argparse.ArgumentParser(description="基金分析")
     parser.add_argument("keyword", help="基金代码或名称")
     parser.add_argument("--json", action="store_true", help="输出 JSON 格式")
+    parser.add_argument("--analytics", action="store_true",
+                        help="ETF 深度分析（穿透/风险/回撤/排名）")
     args = parser.parse_args()
 
     try:
@@ -377,6 +386,59 @@ def main():
     except Exception as e:
         print(f"错误: {e}", file=sys.stderr)
         sys.exit(1)
+
+    if args.analytics:
+        from etf_analytics import analyze_etf, format_terminal
+
+        # 获取 K 线数据用于回撤分析
+        kline_data = None
+        code = data.get("code") or args.keyword
+        try:
+            from cmd_kline import run as kline_run
+            import io
+            import contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                kline_run(code, period="day", limit=250, as_json=True)
+            kline_json = json.loads(buf.getvalue())
+            kline_data = kline_json.get("data", {}).get("rows")
+        except Exception:
+            pass
+
+        # 获取 Index Hub 数据（失败时静默降级）
+        index_hub_data = None
+        try:
+            from sources import index_hub
+            if index_hub.is_available():
+                ih_detail = index_hub.fetch_etf_detail(code)
+                ih_scale = index_hub.fetch_etf_scale(code)
+                index_hub_data = {}
+                if ih_detail.get("ok"):
+                    index_hub_data["detail"] = ih_detail["data"]
+                if ih_scale.get("ok"):
+                    index_hub_data["scale"] = ih_scale["data"]
+                if not index_hub_data:
+                    index_hub_data = None
+        except Exception:
+            pass
+
+        # 获取 ETFirst 数据（失败时静默降级）
+        etfirst_data = None
+        try:
+            from sources import etfirst
+            if etfirst.is_available():
+                ef_result = etfirst.fetch_etf_detail(code)
+                if ef_result.get("ok"):
+                    etfirst_data = ef_result.get("data", {})
+        except Exception:
+            pass
+
+        analysis = analyze_etf(data, kline_data=kline_data, index_hub_data=index_hub_data, etfirst_data=etfirst_data)
+        if args.json:
+            print(json.dumps(analysis, ensure_ascii=False, indent=2))
+        else:
+            print(format_terminal(analysis))
+        return
 
     if args.json:
         print(json.dumps(data, ensure_ascii=False, indent=2))

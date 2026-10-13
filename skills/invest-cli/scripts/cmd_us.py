@@ -624,13 +624,98 @@ def _format_bitget(data: dict) -> str:
     return "\n".join(lines)
 
 
+def print_eod_history(symbol: str, years: float = 1.0, as_json: bool = False) -> int:
+    """`us <代码> --history` 入口：Tiingo EOD 历史专项（唯一提供可靠复权历史的源）。
+
+    返回进程退出码（0 成功 / 1 失败），错误走 stderr——与 main() 的错误纪律一致。
+    """
+    from sources.tiingo import eod_history
+
+    res = eod_history(symbol, years=years)
+    if not res.get("ok") or not isinstance(res.get("data"), dict):
+        print(f"错误: {res.get('error') or 'EOD 历史取数失败'}", file=sys.stderr)
+        return 1
+    if as_json:
+        print(json.dumps(res["data"], ensure_ascii=False, indent=2))
+        return 0
+    print(_format_history(res["data"], years=years))
+    return 0
+
+
+def _format_history(data: dict[str, Any], years: float = 1.0) -> str:
+    """EOD 历史终端渲染：摘要 + 最近 10 根。币种口径与快照渲染器一致。"""
+    s = data.get("summary") or {}
+    symbol = data.get("symbol", "?")
+    name = data.get("name", symbol) if data.get("name") else symbol
+    lines = [
+        f"\n{'=' * 60}",
+        f"  {name}（{symbol}）— Tiingo EOD 历史（近 {years:g} 年）",
+        "  收盘口径 | 官方交易所数据（adj_close 为复权收盘价）",
+        f"{'=' * 60}",
+        f"\n  {'指标':<16} {'数值':>16}",
+        f"  {'-' * 34}",
+    ]
+    bars_n = s.get("bars")
+    if bars_n:
+        lines.append(f"  {'K线根数':<16} {bars_n:>16}")
+    if s.get("start"):
+        rng = f"{s.get('start')} ~ {s.get('end')}"
+        lines.append(f"  {'区间':<16} {rng:>16}")
+    if s.get("high_window") is not None:
+        lines.append(f"  {'区间最高':<16} {s['high_window']:>16.2f}")
+    if s.get("low_window") is not None:
+        lines.append(f"  {'区间最低':<16} {s['low_window']:>16.2f}")
+    if s.get("max_drawdown") is not None:
+        lines.append(f"  {'最大回撤':<16} {s['max_drawdown'] * 100:>15.1f}%")
+    if s.get("dividends_ttm"):
+        lines.append(f"  {'分红合计':<16} {s['dividends_ttm']:>16.4g}")
+        if s.get("dividend_yield"):
+            lines.append(f"  {'股息率':<16} {s['dividend_yield'] * 100:>15.2f}%")
+    for ev in (s.get("splits") or []):
+        ev_txt = f"{ev.get('date')} ×{ev.get('split_factor'):g}"
+        lines.append(f"  {'拆股事件':<16} {ev_txt:>16}")
+    if not bars_n:
+        lines.append(f"  {'-':<16} {'无数据':>16}")
+        return "\n".join(lines)
+
+    bars = (data.get("bars") or [])[-10:]
+    lines.append(f"\n  最近 {len(bars)} 根（倒序）:")
+    header = f"  {'日期':<12}{'开盘':>10}{'最高':>10}{'最低':>10}{'收盘':>10}{'复权收盘':>12}{'成交量':>14}"
+    lines.append(f"  {'-' * 78}")
+    lines.append(header)
+    for b in reversed(bars):
+        lines.append(
+            f"  {b.get('date', ''):<12}"
+            f"{_num(b.get('open')):>10}{_num(b.get('high')):>10}{_num(b.get('low')):>10}"
+            f"{_num(b.get('close')):>10}{_num(b.get('adj_close')):>12}"
+            f"{_num(b.get('volume'), grouped=True):>14}"
+        )
+    lines.append(f"\n  数据来源: Tiingo（官方 EOD）")
+    return "\n".join(lines)
+
+
+def _num(v: Any, grouped: bool = False) -> str:
+    """K 线数字渲染：缺失印 -；大数（成交量）千分位。"""
+    if v is None:
+        return "-"
+    if grouped and isinstance(v, (int, float)) and abs(v) >= 10000:
+        return f"{v:,.0f}"
+    return f"{v:g}" if isinstance(v, float) else str(v)
+
+
 def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="美股分析")
     parser.add_argument("symbol", help="美股代码，如 AAPL、MSFT、TSLA")
+    parser.add_argument("--history", action="store_true",
+                        help="EOD 历史专项（Tiingo）：复权日线 + 分红/拆股/回撤摘要")
+    parser.add_argument("--years", type=float, default=1.0, help="--history 的年数（默认 1）")
     parser.add_argument("--json", action="store_true", help="输出 JSON 格式")
     args = parser.parse_args()
+
+    if args.history:
+        sys.exit(print_eod_history(args.symbol, years=args.years, as_json=args.json))
 
     try:
         data = fetch_us_with_fallback(args.symbol)

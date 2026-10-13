@@ -68,6 +68,7 @@ _CODE_AT: dict[tuple[str, ...], int] = {
     ("esg",): 1, ("disclosure",): 1, ("bond",): 1,
     ("quote",): 1, ("kline",): 1, ("minute",): 1,
     ("report", "list"): 2, ("news", "list"): 2,
+    ("notice", "list"): 2, ("notice", "detail"): 2,
     ("fund", "flow"): 2, ("etf", "profile"): 2, ("etf", "holdings"): 2,
 }
 _MAX_DEPTH = max(len(k) for k in _CODE_AT)
@@ -241,8 +242,21 @@ def normalize_args(sub: list[str]) -> list[str]:
         return list(sub)
     out = list(sub)
     if idx < len(out) and not out[idx].startswith("-"):
-        out[idx] = _norm_symbol(out[idx])
+        out[idx] = out[idx] if "," in out[idx] else _norm_symbol(out[idx])
     return out
+
+
+def normalize_codes(arg: str) -> str:
+    """逗号分隔的多代码归一（`600519,000001` → `sh600519,sz000001`）。
+
+    `_norm_symbol` 的形状守卫认不出逗号串（`600519,000001` 不匹配代码形状），
+    会原样放行，服务端就按「代码错误」拒绝。多代码是这些命令的公开用法
+    （help 里就写着 `sh600519,sh600000`），所以在这里逐个归一。
+    """
+    parts = [p for p in str(arg or "").split(",") if p.strip()]
+    if not parts:
+        return ""
+    return ",".join(_norm_symbol(p.strip()) or p.strip() for p in parts)
 
 
 def _hint_for_generic_error(text: str, sub: list[str]) -> str:
@@ -284,6 +298,22 @@ def _clean_args(args) -> tuple[list[str], str]:
     return out, ""
 
 
+def _passthrough_ttl(norm: list[str]) -> float:
+    """透传结果的缓存 TTL；帮助与取值域查询不缓存（它们本就便宜且要新鲜）。
+
+    给的是「同轮去重」级短窗口（_common.CACHE_TTL_WESTOCK）：命令集里混着
+    盘中量价类（flow / chip / quote），窗口太长会让盘中数据失真；而同一会话
+    里把同一条命令跑两遍是常态，30s 足够吃掉这次重复。
+    """
+    if _is_help_request(norm) or "--list" in norm:
+        return 0.0
+    try:
+        from _common import CACHE_TTL_WESTOCK
+    except Exception:
+        return 0.0
+    return CACHE_TTL_WESTOCK
+
+
 def call(args) -> dict:
     """透传执行。返回信封 {source, kind, ok, data|error}。"""
     sub, bad = _clean_args(args)
@@ -294,6 +324,17 @@ def call(args) -> dict:
         return {"source": "westock", "kind": "cli", "ok": False, "data": None,
                 "error": "缺少 westock 子命令；用 `invest-cli westock --help` 看命令树"}
     norm = normalize_args(sub)
+    ttl = _passthrough_ttl(norm)
+    ckey = "|".join(norm)
+    if ttl:
+        try:
+            from _common import cache_get
+
+            hit = cache_get("westock", ckey, ttl)
+        except Exception:
+            hit = None
+        if isinstance(hit, dict) and hit.get("ok"):
+            return {**hit, "cached": True}
     try:
         out = _run(norm)
     except WestockError as e:
@@ -301,11 +342,19 @@ def call(args) -> dict:
         hint = _hint_for_generic_error(msg, sub)
         return {"source": "westock", "kind": "cli", "ok": False, "data": None,
                 "error": msg + ("\n" + hint if hint else "")}
-    return {"source": "westock", "kind": "cli", "ok": True,
-            "data": {"command": "westock " + " ".join(norm),
-                     "argv_normalized": norm != sub,
-                     "output": out},
-            "error": None}
+    envelope = {"source": "westock", "kind": "cli", "ok": True,
+                "data": {"command": "westock " + " ".join(norm),
+                         "argv_normalized": norm != sub,
+                         "output": out},
+                "error": None}
+    if ttl:
+        try:
+            from _common import cache_set
+
+            cache_set("westock", ckey, envelope)
+        except Exception:
+            pass
+    return envelope
 
 
 def list_values(command: list[str]) -> dict:

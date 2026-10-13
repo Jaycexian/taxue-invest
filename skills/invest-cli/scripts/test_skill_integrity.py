@@ -106,25 +106,35 @@ def _installed_skill_names() -> set[str]:
 
 
 def test_skill_pointers_resolve() -> None:
-    """invest-* / taxue-* 活引用必须指向真实存在的技能目录。"""
+    """invest-* / taxue-* / meth-* 活引用必须指向真实存在的技能目录。
+
+    覆盖 SKILL.md 与 references/*.md：2026-10-07 把 taxue 方法论九件吸纳进
+    meth 系列后，悬空指针正是先出现在 invest-analyst 的 references 里。
+    """
     installed = _installed_skill_names()
     missing: list[str] = []
     # 别用 \b 收尾：中文里技能名后面紧跟着汉字是常态（「invest-industry做…」），
     # 而 Python 的 \w 默认把汉字算作词字符，`y`→`做` 之间**不存在**词边界，
     # 于是 \b 会让这条守卫静默失效——首版就是这么写的，跑在出问题的旧文本上
     # 依然"通过"（空断言）。改用负向断言：前后不得紧跟同类字符。
-    pattern = re.compile(r"(?<![a-z0-9-])(?:invest|taxue)-[a-z0-9]+(?:-[a-z0-9]+)*(?![a-z0-9-])")
+    pattern = re.compile(r"(?<![a-z0-9-])(?:invest|taxue|meth)-[a-z0-9]+(?:-[a-z0-9]+)*(?![a-z0-9-])")
     for skill in INVEST_FAMILY:
-        md = SKILLS / skill / "SKILL.md"
-        if not md.is_file():
-            continue
-        for lineno, line in enumerate(md.read_text(encoding="utf-8").splitlines(), 1):
-            if any(mark in line for mark in _ARCHIVE_CTX):
+        base = SKILLS / skill
+        targets = [base / "SKILL.md"]
+        refs_dir = base / "references"
+        if refs_dir.is_dir():
+            targets += sorted(refs_dir.glob("*.md"))
+        for md in targets:
+            if not md.is_file():
                 continue
-            for tok in pattern.findall(line):
-                if tok in installed or tok in _ARCHIVED or tok == skill:
+            rel = md.relative_to(SKILLS)
+            for lineno, line in enumerate(md.read_text(encoding="utf-8").splitlines(), 1):
+                if any(mark in line for mark in _ARCHIVE_CTX):
                     continue
-                missing.append(f"{skill}/SKILL.md:{lineno} → {tok}")
+                for tok in pattern.findall(line):
+                    if tok in installed or tok in _ARCHIVED or tok == skill:
+                        continue
+                    missing.append(f"{rel}:{lineno} → {tok}")
     assert not missing, (
         "技能名悬空引用（重命名后没跟上，会把路由引向不存在的技能）：\n  " + "\n  ".join(missing)
     )
@@ -166,7 +176,7 @@ def test_cli_runtime_doc_is_cited_and_marked() -> None:
 
 
 def test_pointer_guard_regex_actually_matches() -> None:
-    """守卫自检：正则必须能抓到「技能名紧贴汉字」这种最常见形态。
+    r"""守卫自检：正则必须能抓到「技能名紧贴汉字」这种最常见形态。
 
     首版用 `\b` 收尾，汉字被 Python 的 `\w` 视为词字符，`invest-industry做`
     之间没有词边界 → 正则匹配不到 → 守卫在出问题的旧文本上也能"通过"。
@@ -174,17 +184,19 @@ def test_pointer_guard_regex_actually_matches() -> None:
     """
     import re as _re
 
-    pattern = _re.compile(r"(?<![a-z0-9-])(?:invest|taxue)-[a-z0-9]+(?:-[a-z0-9]+)*(?![a-z0-9-])")
+    pattern = _re.compile(r"(?<![a-z0-9-])(?:invest|taxue|meth)-[a-z0-9]+(?:-[a-z0-9]+)*(?![a-z0-9-])")
     samples = [
         "invest-industry做「行业是什么」",          # 紧贴汉字（旧文本的真实形态）
-        "该走 taxue-industry，不是别的",            # 后跟全角逗号
+        "该走 taxue-industry，不是别的",            # 后跟全角逗号（别名门豁免：正则自检样本，非活引用）
         "见 invest-stock/references/x.md",          # 后跟斜杠：只应匹配 invest-stock
         "invest-us 已归档",
+        "行业怎么看走 meth-industry",               # meth 前缀同样要被抓到
     ]
     assert "invest-industry" in pattern.findall(samples[0]), "紧贴汉字时抓不到"
-    assert "taxue-industry" in pattern.findall(samples[1])
+    assert "taxue-industry" in pattern.findall(samples[1])  # 别名门豁免：正则自检样本，非活引用
     assert pattern.findall(samples[2]) == ["invest-stock"], "路径形态应只取技能名部分"
     assert "invest-us" in pattern.findall(samples[3])
+    assert "meth-industry" in pattern.findall(samples[4])
 
 
 # ── 引用路径可达性（全家族，2026-09-22 补）
@@ -284,3 +296,12 @@ def test_workbuddy_routing_page_only_points_to_live_skills():
             if name and not (SKILLS / name / "SKILL.md").is_file():
                 missing.append(f"{name} （出现在: {line.strip()[:70]}）")
     assert not missing, "路由页指向了不存在的技能：\n  " + "\n  ".join(missing)
+
+
+if __name__ == "__main__":
+    # 裸跑（python3 test_skill_integrity.py）必须真执行：此前是纯 pytest 风格无入口，
+    # 直接跑等于空转（exit 0 假绿）——2026-10-07 的 taxue-industry 悬空残留就是
+    # 这样在眼皮底下躺了半个月。这个文件存在的全部意义就是被跑起来。
+    import pytest as _pytest
+
+    raise SystemExit(_pytest.main([__file__, "-q"]))
