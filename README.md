@@ -4,6 +4,10 @@
 
 这个工具帮你三件事：**看清投的是什么，判断值不值得投，确定价格合不合适**。
 
+**支持 17 个数据源（API）与 11 个分析方法论**：
+- **数据源**：免 Key 源（腾讯行情 / SEC EDGAR / FRED / yfinance）+ 配置启用源（同花顺 / 东方财富 / 妙想 / FMP / Tiingo / Wind / 盈米 / 天天基金官方 ttskill）+ 长尾能力（腾讯微证券 40+ 子命令）
+- **方法论**：覆盖个股、基金、选基、单一资产（债/转债/商品/REITs）、资产配置、风险管理、企业深度、宏观环境、机构级产出、多视角会诊
+
 ---
 
 ## 快速安装，输入下列指令即可开始使用
@@ -24,21 +28,38 @@ npx skills add taxueseek/fund-investment-guide
 
 ---
 
-## 可选：配置数据源（配置后启用对应能力）
+## 支持的数据源（API）
 
-装上就能用**判断框架**。不配任何 API 也能分析（公开检索 + 你提供的材料）。
+装上就能用**判断框架**。不配任何 API 也能分析（公开检索 + 你提供的材料 + 免 Key 取数通道）。共 **17 个数据源**（下表为常用源），按启用方式分三档；取数与下判断分离：
 
-按需配置后，**对应取数能力才会启用**；取数与下判断分离：
+### 免 Key（装上即用）
 
-| 你配置了 | 启用的能力 |
-|:---------|:-----------|
-| （什么都不配） | 判断框架 + 公开检索；另有免 Key 取数：`invest-cli quote`（腾讯行情，零鉴权多标的实时行情）、`invest-cli sec`（SEC 财报原文）、`invest-cli us`（装 yfinance 即可）、`invest-cli intent macro`（FRED 免 Key 通道） |
-| 同花顺金融数据服务 `HITHINK_FINANCE_API_KEY` | `invest-cli stock` / `fund` 的 A 股与公募主路（快、字段全） |
-| 东方财富 `EASTMONEY_APIKEY` | A 股/港股快照、基金快照、自然语言选股；港股必经此路 |
-| Python 包 `yfinance` | `invest-cli us` 美股快照（行情+财务+评级） |
-| 官方 `ttskill`（天天基金，可选） | `fund` 快照的深取补充（同类分位/机构占比/经理在管）；未登录自动跳过 |
-| [argo](https://github.com/taxueseek/argo)（可选） | `invest-cli info` 资讯/舆情、`intent macro` 宏观走财经垂直源，多数免 Key，省结构化源配额 |
-| 腾讯微证券 CLI（可选，装好即用） | `invest-cli westock` 长尾能力：筹码/龙虎榜/陆股通/北向/两融/一致预期/ESG/机构评级/产业链/板块估值/可转债条款等 40+ 子命令 |
+| 数据源 | 启用能力 |
+|:-------|:---------|
+| **腾讯行情**（零鉴权） | `invest-cli quote` 多标的实时行情、`kline` K 线；A股/港股/美股/ETF/可转债 |
+| **SEC EDGAR** | `invest-cli sec` 美股财报原文（10-K XBRL + 申报清单） |
+| **FRED** | `invest-cli intent macro` 净流动性三序列（免 Key 走 CSV 通道） |
+| **yfinance**（Python 包） | `invest-cli us` 美股快照（行情 + 财务 + 评级） |
+
+### 配置后启用
+
+| 数据源 | 配置物 | 启用能力 |
+|:-------|:-------|:---------|
+| **同花顺金融数据服务** | `HITHINK_FINANCE_API_KEY` | `stock` / `fund` 的 A 股与公募主路（快、字段全） |
+| **东方财富** | `EASTMONEY_APIKEY` | A 股/港股快照、基金快照、自然语言选股；港股必经此路 |
+| **妙想**（东方财富） | `EM_API_KEY` | `screen` 自然语言选股、`intent deep bond` 债券场景 |
+| **Financial Modeling Prep** | `FMP_API_KEY` | `invest-cli fmp` 美股基本面/一致预期/评级/分红（免费档 250 次/天） |
+| **Tiingo** | `TIINGO_API_KEY` | `invest-cli us <代码> --history` 美股 EOD 历史 |
+| **Wind**（万得） | `WIND_API_KEY` | 机构级数据，`invest-cli wind` 透传 |
+| **盈米且慢** | `~/.yingmi-skill-cli/config.json` | 基金诊断/组合/配置方案（`intent deep fund` / `portfolio` / `plan`） |
+| **天天基金官方 ttskill** | 官方登录 | `fund` 快照深取补充（同类分位/机构占比/经理在管） |
+| [argo](https://github.com/taxueseek/argo) | 安装 argo | `invest-cli info` 资讯/舆情、宏观检索兜底（多数免 Key，省结构化源配额） |
+
+### 长尾能力
+
+| 数据源 | 配置物 | 启用能力 |
+|:-------|:-------|:---------|
+| **腾讯微证券 CLI** | 安装 westock 二进制 | `invest-cli westock` 40+ 子命令：筹码/龙虎榜/陆股通/北向/两融/一致预期/ESG/机构评级/产业链/板块估值/可转债条款 |
 
 **取数与判断分离**：数据层只负责「把数取回来并标明来源」，判断由 `invest-*` 框架完成。
 **零配置也能跑**：不配任何 Key，仍可用 `sec`（SEC EDGAR 官方）、`us`（yfinance）、`intent macro`（FRED）三条免 Key 通道。
@@ -89,7 +110,9 @@ npx skills add taxueseek/fund-investment-guide
 
 ---
 
-## 能分析什么
+## 覆盖的分析能力
+
+11 个方法论技能，覆盖各类分析场景。v3.0 起方法论大幅补强，并按分析对象分层：
 
 | 你要分析 | 路由到 | 核心问题 | 适用市场 |
 |:--------|:-------|:---------|:---------|
@@ -104,6 +127,16 @@ npx skills add taxueseek/fund-investment-guide
 | 出研报/纪要/日报 | invest-analyst | IC 研报、电话会纪要、一致预期、行业深度、市场日报 | 机构级内容产出 |
 | 拿不准？ | invest-discuss | 让多种投资思维同时审视 | 任何标的 |
 | `/cli` 分析 | invest-cli | 终端数据获取 + 分析框架 | A股/港股/美股/基金 |
+
+**方法论补强要点**（v3.0）：
+- **个股**：行业生命周期判断 + 波特五力竞争格局 + 管理层与治理（诚信/能力/激励/股权结构）+ 6 种估值方法交叉验证（PE/PB/DCF/EV-EBITDA/DDM/PS）
+- **基金**：基金经理七维度评分（35 分制）+ 业绩持续性检验（滚动收益/排名稳定/超额持续）+ 费率结构（6 项费率 + 30 年复利影响）+ 行业轮动基金评估
+- **选基（新增）**：风格分类矩阵（5 风格 × 5 类型）+ 选基七维度 + 组合配置原则（底仓/核心/卫星/观察）
+- **风险（新增）**：风险四层递进诊断 + 风险管理四层框架 + 不依赖意志力的系统设计 + 现金管理三层安全垫
+- **企业深度（新增）**：15 板块（股东治理/行业/经营/财务/信用/司法）
+- **配置**：投稳/投变框架 + 全天候三核心 + 组合风险度量（波动率/最大回撤/VaR/CVaR/夏普/索提诺）+ 相关性矩阵（正常 vs 危机）
+- **宏观**：中国经济核心指标（PMI/CPI/PPI/社融/M2）+ 经济周期四阶段定位 + 全球央行政策协调
+- **分析师**：金融文档速读引擎（5 层 MECE）+ 估值方法论选择矩阵 + 产业链分析框架
 
 ---
 
@@ -514,6 +547,10 @@ Buy funds like hiring a steward, buy stocks like partnering in business. Don't t
 
 This tool helps you with three things: **see what you're investing in, judge whether it's worth it, determine if the price is right**.
 
+**17 data sources (APIs) and 11 analysis methodologies**:
+- **Data sources**: keyless (Tencent quotes / SEC EDGAR / FRED / yfinance) + config-enabled (Hithink / Eastmoney / Miaoxiang / FMP / Tiingo / Wind / YingMi / TTFund official ttskill) + long-tail (Tencent WeStock 40+ subcommands)
+- **Methodologies**: stocks, funds, fund picking, single assets (bonds/convertibles/commodities/REITs), allocation, risk, company deep-dive, macro, institutional output, multi-perspective review
+
 ---
 
 ## Quick Start
@@ -534,23 +571,39 @@ The system automatically identifies what you want to analyze and routes to the c
 
 ---
 
-## Optional: Configure data sources (capabilities unlock after setup)
+## Supported data sources (APIs)
 
-The **judgment framework works immediately** without any API.
+The **judgment framework works immediately** without any API (public search + your own materials + keyless fetch paths). **17 sources** (main ones below), grouped by how they unlock; fetch and judgment are separate:
 
-Configure sources as needed; **structured fetch enables only after config**:
+### Keyless (install and go)
 
-| You configure | Unlocks |
-|:--------------|:--------|
-| (nothing) | Judgment framework + public search; plus keyless fetch paths: `invest-cli quote` (Tencent quotes, keyless multi-symbol real-time), `invest-cli sec` (SEC filings), `invest-cli us` (install yfinance), `invest-cli intent macro` (FRED keyless) |
-| Hithink `HITHINK_FINANCE_API_KEY` | Primary A-share / public-fund snapshot path for `invest-cli stock` / `fund` |
-| Eastmoney `EASTMONEY_APIKEY` | A/HK snapshot, fund snapshot, natural-language screening; required for HK |
-| Python `yfinance` | `invest-cli us` (quote + financials + analyst) |
-| Official `ttskill` (TTFund, optional) | Extra fund fields (peer percentile / institutional ratio / manager AUM); auto-skipped if not logged in |
-| [argo](https://github.com/taxueseek/argo) (optional) | `invest-cli info` news/sentiment, `intent macro` via finance vertical sources; mostly keyless, saves structured quota |
-| Tencent WeStock CLI (optional, install-and-go) | `invest-cli westock` long-tail capabilities: chips / dragon-tiger list / Stock Connect / margin / consensus / ESG / analyst ratings / industry chain / sector valuation / convertible-bond terms and 40+ subcommands |
+| Source | Unlocks |
+|:-------|:--------|
+| **Tencent quotes** (keyless) | `invest-cli quote` multi-symbol real-time, `kline`; A/HK/US/ETF/convertibles |
+| **SEC EDGAR** | `invest-cli sec` US filing原文 (10-K XBRL + filings list) |
+| **FRED** | `invest-cli intent macro` net-liquidity series (keyless CSV path) |
+| **yfinance** (Python pkg) | `invest-cli us` US snapshot (quote + financials + analyst) |
 
-**Fetch and judgment are separate**: the data layer only retrieves numbers and labels the source; the `invest-*` frameworks make the call.
+### Config-enabled
+
+| Source | Config | Unlocks |
+|:-------|:-------|:--------|
+| **Hithink** | `HITHINK_FINANCE_API_KEY` | Primary A-share / public-fund path for `stock` / `fund` |
+| **Eastmoney** | `EASTMONEY_APIKEY` | A/HK snapshot, fund snapshot, natural-language screening; required for HK |
+| **Miaoxiang** (Eastmoney) | `EM_API_KEY` | `screen` natural-language screening, `intent deep bond` |
+| **Financial Modeling Prep** | `FMP_API_KEY` | `invest-cli fmp` US fundamentals / consensus / ratings / dividends (free tier 250/day) |
+| **Tiingo** | `TIINGO_API_KEY` | `invest-cli us <code> --history` US EOD history |
+| **Wind** | `WIND_API_KEY` | Institutional-grade data, `invest-cli wind` passthrough |
+| **YingMi** | `~/.yingmi-skill-cli/config.json` | Fund/portfolio diagnosis and plans (`intent deep fund` / `portfolio` / `plan`) |
+| **TTFund official ttskill** | official login | Extra fund fields (peer percentile / institutional ratio / manager AUM) |
+| [argo](https://github.com/taxueseek/argo) | install argo | `invest-cli info` news/sentiment, macro retrieval fallback (mostly keyless) |
+
+### Long-tail
+
+| Source | Config | Unlocks |
+|:-------|:-------|:--------|
+| **Tencent WeStock CLI** | install westock binary | `invest-cli westock` 40+ subcommands: chips / dragon-tiger list / Stock Connect / margin / consensus / ESG / analyst ratings / industry chain / sector valuation / convertible-bond terms |
+
 **Zero-config still works**: without any key you can still use `sec` (SEC EDGAR), `us` (yfinance) and `intent macro` (FRED).
 
 **Division of labor with argo**: YingMi / Wind / Hithink / Eastmoney handle precise numbers, argo handles retrieval. Engine names are passed through verbatim — invest-cli keeps no local allow-list (it always drifts), so a wrong engine errors out with the command to list valid ones instead of silently returning an empty result.
@@ -593,7 +646,9 @@ User Question
 
 ---
 
-## What You Can Analyze
+## Analysis coverage
+
+11 methodology skills covering every analysis scenario. Since v3.0 the methodologies are substantially deepened and layered by target:
 
 | You want to analyze | Routes to | Core Question | Applicable Markets |
 |:--------------------|:----------|:--------------|:-------------------|
@@ -608,6 +663,16 @@ User Question
 | Research note / minutes / daily | invest-analyst | IC memo, earnings-call minutes, consensus, industry deep-dive, daily report | Institutional-grade output |
 | Not sure? | invest-discuss | Let multiple investment minds examine together | Any target |
 | `/cli` analysis | invest-cli | Terminal data fetch + analysis framework | A/HK/US stocks, funds |
+
+**Methodology highlights (v3.0)**:
+- **Stocks**: industry life-cycle + Porter's Five Forces + management & governance + 6-method valuation cross-check (PE/PB/DCF/EV-EBITDA/DDM/PS)
+- **Funds**: 7-dimension manager score (out of 35) + performance-persistence tests + fee structure (6 fee items + 30-year compounding) + sector-rotation fund assessment
+- **Fund picking (new)**: style matrix (5 styles × 5 types) + 7-dimension pick + portfolio construction (core/satellite/watch)
+- **Risk (new)**: four-layer risk diagnosis + four-layer risk management + willpower-free system design + three-tier cash cushion
+- **Company deep-dive (new)**: 15 sections (governance / industry / operations / financials / credit / legal)
+- **Allocation**: hold-firm/hold-change framework + all-weather three questions + risk metrics (vol / max drawdown / VaR / CVaR / Sharpe / Sortino) + correlation matrix (normal vs crisis)
+- **Macro**: China core indicators (PMI/CPI/PPI/Tsf/M2) + four-phase cycle positioning + global central-bank coordination
+- **Analyst**: financial-document speed-reading engine (5-layer MECE) + valuation-method selection matrix + industry-chain framework
 
 ---
 
