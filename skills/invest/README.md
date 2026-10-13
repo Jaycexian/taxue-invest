@@ -83,4 +83,4 @@ ln -s "$HOME/.agents/skills/invest-cli/scripts/invest_cli.py" ~/.local/bin/inves
 
 ---
 
-**许可证**：MIT License
+**许可证**：Prosperity Public License 3.0.0 — 个人非商业使用免费，商业使用需 30 天试用后获取授权

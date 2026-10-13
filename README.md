@@ -938,4 +938,4 @@ If this project is helpful to you, feel free to give it a Star.
 
 ---
 
-MIT License © 2026
+Prosperity Public License 3.0.0 © 2026 — 个人非商业使用免费，商业使用需 30 天试用后获取授权
