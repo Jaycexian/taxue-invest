@@ -153,6 +153,61 @@
       return option;
     },
 
+    // Changxin vs YMTC: grouped revenue bars + net profit lines
+    "duo-compare": function (rows) {
+      const option = base();
+      option.color = [palette.blue, palette.teal, palette.blue, palette.teal];
+      option.legend = {
+        top: 6,
+        textStyle: { color: "#566173" },
+        data: [
+          { name: "长鑫 营收", icon: "roundRect" },
+          { name: "长存 营收", icon: "roundRect" },
+          { name: "长鑫 归母净利", icon: "line" },
+          { name: "长存 归母净利", icon: "line" }
+        ]
+      };
+      option.grid = { left: 62, right: 66, top: 66, bottom: 44, containLabel: true };
+      option.xAxis = Object.assign({ type: "category", data: rows.map((r) => r.period) }, axisCommon);
+      option.yAxis = [
+        Object.assign({ type: "value", name: "营收（亿元）" }, axisCommon),
+        Object.assign({ type: "value", name: "归母净利（亿元）" }, axisCommon)
+      ];
+      option.series = [
+        {
+          name: "长鑫 营收",
+          type: "bar",
+          barMaxWidth: 28,
+          itemStyle: { borderRadius: [5, 5, 0, 0] },
+          data: rows.map((r) => r.cx_rev)
+        },
+        {
+          name: "长存 营收",
+          type: "bar",
+          barMaxWidth: 28,
+          itemStyle: { borderRadius: [5, 5, 0, 0] },
+          data: rows.map((r) => r.cxmt_rev)
+        },
+        {
+          name: "长鑫 归母净利",
+          type: "line",
+          yAxisIndex: 1,
+          symbolSize: 6,
+          lineStyle: { width: 2, type: "dashed" },
+          data: rows.map((r) => r.cx_np)
+        },
+        {
+          name: "长存 归母净利",
+          type: "line",
+          yAxisIndex: 1,
+          symbolSize: 6,
+          lineStyle: { width: 2, type: "dashed" },
+          data: rows.map((r) => r.cxmt_np)
+        }
+      ];
+      return option;
+    },
+
     // Close price since IPO
     price: function (rows) {
       const option = base();
